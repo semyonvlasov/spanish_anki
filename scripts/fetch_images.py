@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 USER_AGENT = "spanish-anki-deck-builder/1.0 (personal study deck; contact via github.com/semyonvlasov)"
 TIMEOUT = 45
-MAX_EDGE = 800
+MAX_EDGE = 800  # overridden by --max-edge
 JPEG_QUALITY = 82
 MIN_BYTES = 2_000
 
@@ -298,10 +298,16 @@ def main() -> None:
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
     ap.add_argument("--limit", type=int, default=0, help="only fetch N missing concepts (0 = all)")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--max-edge", type=int, default=MAX_EDGE,
+                    help="longest image edge in pixels; drives the finished deck's size")
     ap.add_argument("--no-placeholder", action="store_true")
     ap.add_argument("--retry-placeholders", action="store_true",
                     help="re-search concepts that previously fell back to a placeholder")
     args = ap.parse_args()
+
+    global MAX_EDGE
+    MAX_EDGE = args.max_edge
+    print(f"normalising images to {MAX_EDGE}px on the longest edge")
 
     notes = json.loads(args.notes.read_text(encoding="utf-8"))["notes"]
     tags = {}

@@ -14,6 +14,9 @@ on:
       image_limit:
         description: "Fetch images for at most this many notes (0 = all)"
         default: "0"
+      max_edge:
+        description: "Longest image edge in pixels (400 small / 600 balanced / 800 large)"
+        default: "600"
       allow_placeholders:
         description: "Generate a text card when no image is found"
         type: boolean
@@ -104,6 +107,7 @@ jobs:
           fi
           python scripts/fetch_images.py \
             --limit "${{ inputs.image_limit }}" \
+            --max-edge "${{ inputs.max_edge }}" \
             --workers 4 \
             $EXTRA
 
