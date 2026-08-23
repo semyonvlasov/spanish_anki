@@ -305,6 +305,9 @@ def main() -> None:
     ap.add_argument("--no-placeholder", action="store_true")
     ap.add_argument("--retry-placeholders", action="store_true",
                     help="re-search concepts that previously fell back to a placeholder")
+    ap.add_argument("--upgrade-from", default="",
+                    help="comma-separated providers whose existing hits should be re-searched, "
+                         "so adding an API key can replace weaker results (e.g. 'openverse')")
     args = ap.parse_args()
 
     MAX_EDGE = args.max_edge
@@ -329,18 +332,28 @@ def main() -> None:
     if args.manifest.exists():
         manifest = json.loads(args.manifest.read_text(encoding="utf-8")).get("images", {})
 
+    stale_providers = {p.strip() for p in args.upgrade_from.split(",") if p.strip()}
+    if args.retry_placeholders:
+        stale_providers.add("placeholder")
+    if stale_providers:
+        print(f"re-searching anything previously found by: {sorted(stale_providers)}")
+
     def needs_fetch(target: dict) -> bool:
         entry = manifest.get(target["key"])
         if not entry:
             return True
         if not (args.images_dir / entry["file"]).exists():
             return True
-        return args.retry_placeholders and entry.get("provider") == "placeholder"
+        return entry.get("provider") in stale_providers
 
     pending = [t for t in targets if needs_fetch(t)]
-    if args.limit:
+    cached = len(targets) - len(pending)
+    if args.limit and len(pending) > args.limit:
+        print(f"{cached:,} already cached, {len(pending):,} missing, "
+              f"taking the {args.limit:,} most-reused this run")
         pending = pending[: args.limit]
-    print(f"{len(targets) - len(pending):,} already cached, fetching {len(pending):,}")
+    else:
+        print(f"{cached:,} already cached, fetching {len(pending):,}")
 
     def worker(target: dict) -> dict | None:
         time.sleep(random.uniform(0.1, 0.5))  # be polite to the free endpoints

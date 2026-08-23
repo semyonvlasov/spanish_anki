@@ -24,6 +24,9 @@ on:
       release_tag:
         description: "Release tag to publish the built decks under"
         default: "decks-latest"
+      upgrade_from:
+        description: "Re-search hits from these providers, e.g. 'openverse' after adding a better API key"
+        default: ""
       min_coverage:
         description: "Fail a full build if fewer than this share of concepts got an image (0-1)"
         default: "0.35"
@@ -141,6 +144,9 @@ jobs:
           EXTRA=""
           if [ "${{ inputs.allow_placeholders }}" != "true" ]; then
             EXTRA="--no-placeholder"
+          fi
+          if [ -n "${{ inputs.upgrade_from }}" ]; then
+            EXTRA="$EXTRA --upgrade-from ${{ inputs.upgrade_from }}"
           fi
           python scripts/fetch_images.py \
             --limit "${{ inputs.image_limit }}" \
