@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "inspect = unpack and report only; full = fetch images, build, release"
+        description: "inspect = unpack and report; smoke = try a few image searches; full = build and release"
         type: choice
-        options: [inspect, full]
+        options: [inspect, smoke, full]
         default: inspect
       drive_file_id:
         description: "Drive file id of the source .apkg (shared with anyone-with-the-link)"
@@ -24,6 +24,9 @@ on:
       release_tag:
         description: "Release tag to publish the built decks under"
         default: "decks-latest"
+      min_coverage:
+        description: "Fail a full build if fewer than this share of concepts got an image (0-1)"
+        default: "0.35"
 
 permissions:
   contents: write
@@ -82,7 +85,37 @@ jobs:
 
       - name: Stop after inspection
         if: inputs.stage == 'inspect'
-        run: echo "Inspection done -- rerun with stage=full to build the decks."
+        run: echo "Inspection done -- rerun with stage=smoke or stage=full."
+
+      # ---- smoke: prove the image providers actually answer -----------------
+
+      - name: Smoke-test the image providers
+        if: inputs.stage == 'smoke'
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          python scripts/fetch_images.py \
+            --limit 24 --workers 3 --max-edge "${{ inputs.max_edge }}" --no-placeholder
+          python - <<'PY'
+          import json, pathlib, sys
+          doc = json.loads(pathlib.Path("data/images.json").read_text())["images"]
+          if not doc:
+              sys.exit("SMOKE FAILED: every provider came back empty for all 24 queries")
+          print(f"fetched {len(doc)}/24")
+          for entry in list(doc.values())[:24]:
+              print(f"  {entry['query']:<34} {entry['provider']:<12} {entry['bytes']:>7,} B")
+          PY
+
+      - name: Upload the smoke images for eyeballing
+        if: inputs.stage == 'smoke'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-images
+          path: |
+            build/images
+            data/images.json
 
       # ---- everything below only runs for a full build -------------------
 
@@ -118,6 +151,26 @@ jobs:
       - name: Mirror images to Google Drive
         if: inputs.stage == 'full' && env.GDRIVE_SERVICE_ACCOUNT_JSON != ''
         run: python scripts/gdrive_sync.py --share
+
+      - name: Check image coverage before building
+        if: inputs.stage == 'full'
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, sys
+          images = json.loads(pathlib.Path("data/images.json").read_text())["images"] \
+              if pathlib.Path("data/images.json").exists() else {}
+          tags = json.loads(pathlib.Path("data/tags.json").read_text())["tags"]
+          concepts = {t["concept_key"] for t in tags.values() if t.get("concept_key")}
+          got, want = len(images), len(concepts)
+          share = got / want if want else 0.0
+          floor = float("${{ inputs.min_coverage }}")
+          print(f"image coverage: {got:,}/{want:,} concepts = {share:.1%} (floor {floor:.0%})")
+          if share < floor:
+              sys.exit(
+                  "Refusing to publish: the image fetch covered too little to be worth a "
+                  "release. Fix the fetch and re-run -- the cache makes a re-run cheap."
+              )
+          PY
 
       - name: Build both decks
         if: inputs.stage == 'full'
