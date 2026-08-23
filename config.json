@@ -1,0 +1,8 @@
+{
+  "_comment": "Pin the source deck's field roles here when auto-detection guesses wrong.",
+  "fields": {
+    "spanish": null,
+    "english": null,
+    "audio": null
+  }
+}

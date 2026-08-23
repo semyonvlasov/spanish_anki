@@ -1,0 +1,153 @@
+name: Build decks
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "inspect = unpack and report only; full = fetch images, build, release"
+        type: choice
+        options: [inspect, full]
+        default: inspect
+      drive_file_id:
+        description: "Drive file id of the source .apkg (shared with anyone-with-the-link)"
+        default: "1aCxAzLPFzQ_Q16XGs93UBTz9eaKD-BkK"
+      image_limit:
+        description: "Fetch images for at most this many notes (0 = all)"
+        default: "0"
+      allow_placeholders:
+        description: "Generate a text card when no image is found"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Release tag to publish the built decks under"
+        default: "decks-latest"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # Hoisted to job level so the steps below can test them in `if:`.
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+      GDRIVE_PARENT_ID: ${{ secrets.GDRIVE_PARENT_ID }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # The source deck is large and never changes; keep it between runs.
+      - name: Cache source deck
+        uses: actions/cache@v4
+        with:
+          path: source/source_deck.apkg
+          key: source-deck-${{ inputs.drive_file_id }}
+
+      - name: Download source deck
+        run: python scripts/download_deck.py --drive-id "${{ inputs.drive_file_id }}"
+
+      - name: Unpack
+        run: python scripts/unpack.py
+
+      - name: Report scale
+        run: python scripts/estimate.py | tee scale-report.txt
+
+      - name: Upload unpacked notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: |
+            data/notes.json
+            scale-report.txt
+
+      - name: Stop after inspection
+        if: inputs.stage == 'inspect'
+        run: echo "Inspection done -- rerun with stage=full to build the decks."
+
+      # ---- everything below only runs for a full build -------------------
+
+      - name: Restore image cache from the previous release
+        if: inputs.stage == 'full'
+        run: |
+          mkdir -p build/images
+          if gh release download "${{ inputs.release_tag }}" --pattern images.zip --dir /tmp 2>/dev/null; then
+            unzip -q -o /tmp/images.zip -d build/images
+            echo "restored $(find build/images -name '*.jpg' | wc -l) cached images"
+          else
+            echo "no previous image cache"
+          fi
+
+      - name: Fetch images
+        if: inputs.stage == 'full'
+        continue-on-error: true
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.allow_placeholders }}" != "true" ]; then
+            EXTRA="--no-placeholder"
+          fi
+          python scripts/fetch_images.py \
+            --limit "${{ inputs.image_limit }}" \
+            --workers 4 \
+            $EXTRA
+
+      - name: Mirror images to Google Drive
+        if: inputs.stage == 'full' && env.GDRIVE_SERVICE_ACCOUNT_JSON != ''
+        run: python scripts/gdrive_sync.py --share
+
+      - name: Build both decks
+        if: inputs.stage == 'full'
+        run: python scripts/build_decks.py
+
+      - name: Pack the image cache
+        if: inputs.stage == 'full'
+        run: |
+          mkdir -p build/images
+          cd build/images && zip -q -r /tmp/images.zip . && ls -la /tmp/images.zip
+
+      - name: Commit the image manifest
+        if: inputs.stage == 'full'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/images.json
+          git commit -m "Refresh image manifest" || echo "nothing to commit"
+          git push || echo "push skipped"
+
+      - name: Write release notes
+        if: inputs.stage == 'full'
+        run: |
+          {
+            echo "Built from the Tatoeba source deck by \`.github/workflows/build-decks.yml\`."
+            echo
+            echo "- \`spanish_es-en_hinted-image.apkg\` - Spanish on the front with audio, context image behind a hint button."
+            echo "- \`spanish_en-es_hinted-audio.apkg\` - English and the image on the front, Spanish audio behind a hint button."
+            echo "- \`images.zip\` - the image cache, reused by later runs."
+            echo
+            echo '```'
+            cat scale-report.txt
+            echo '```'
+          } > release-notes.md
+
+      - name: Publish the decks
+        if: inputs.stage == 'full'
+        run: |
+          gh release delete "${{ inputs.release_tag }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "${{ inputs.release_tag }}" \
+            --title "Spanish decks ($(date -u +%Y-%m-%d))" \
+            --notes-file release-notes.md \
+            dist/spanish_es-en_hinted-image.apkg \
+            dist/spanish_en-es_hinted-audio.apkg \
+            /tmp/images.zip

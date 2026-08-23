@@ -1,0 +1,11 @@
+build/
+dist/
+source/*.apkg
+__pycache__/
+*.pyc
+.venv/
+
+# Derived from the source deck on every run and potentially very large;
+# published as a CI artifact instead. data/images.json IS tracked -- it is the
+# link manifest that lets git carry references instead of the JPEGs.
+data/notes.json

@@ -1,0 +1,6 @@
+genanki==0.13.1
+requests>=2.31
+zstandard>=0.22
+Pillow>=10.0
+google-api-python-client>=2.120
+google-auth>=2.28
