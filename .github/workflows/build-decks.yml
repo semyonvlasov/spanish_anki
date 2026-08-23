@@ -123,6 +123,10 @@ jobs:
         if: inputs.stage == 'full'
         run: python scripts/build_decks.py
 
+      - name: Verify the built decks
+        if: inputs.stage == 'full'
+        run: PYTHONPATH=scripts python scripts/verify_decks.py
+
       - name: Pack the image cache
         if: inputs.stage == 'full'
         run: |
