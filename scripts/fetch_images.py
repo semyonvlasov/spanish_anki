@@ -107,7 +107,14 @@ def search_openverse(query: str) -> list[str]:
         "https://api.openverse.org/v1/images/",
         params={"q": query, "page_size": 5, "mature": "false"},
     )
-    return [r["url"] for r in data.get("results", []) if r.get("url")]
+    # The thumbnail is already close to the size we downscale to; the original
+    # is often several megabytes of detail we immediately discard.
+    return [
+        url
+        for r in data.get("results", [])
+        for url in [r.get("thumbnail") or r.get("url")]
+        if url
+    ]
 
 
 def search_wikimedia(query: str) -> list[str]:
@@ -219,19 +226,27 @@ def placeholder(text: str) -> bytes:
     return out.getvalue()
 
 
+PER_CONCEPT_DEADLINE = 90  # seconds; a stalling provider must not stall the run
+
+
 def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict | None:
     query = target["query"]
     if not query:
         return None
     filename = f"{hashlib.sha1(target['key'].encode()).hexdigest()[:16]}.jpg"
+    deadline = time.monotonic() + PER_CONCEPT_DEADLINE
 
     for provider_name, provider in PROVIDERS:
+        if time.monotonic() > deadline:
+            break
         try:
             urls = provider(query)
         except Exception as exc:
             print(f"    [{provider_name}] {query!r}: {exc}", file=sys.stderr)
             continue
         for url in urls[:4]:
+            if time.monotonic() > deadline:
+                break
             try:
                 resp = session.get(url, timeout=TIMEOUT)
                 if resp.status_code != 200 or len(resp.content) < MIN_BYTES:
