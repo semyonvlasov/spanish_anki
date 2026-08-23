@@ -219,10 +219,11 @@ def placeholder(text: str) -> bytes:
     return out.getvalue()
 
 
-def fetch_one(record: dict, images_dir: Path, allow_placeholder: bool) -> dict | None:
-    query = build_query(record)
+def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict | None:
+    query = target["query"]
     if not query:
         return None
+    filename = f"{hashlib.sha1(target['key'].encode()).hexdigest()[:16]}.jpg"
 
     for provider_name, provider in PROVIDERS:
         try:
@@ -240,10 +241,10 @@ def fetch_one(record: dict, images_dir: Path, allow_placeholder: bool) -> dict |
                 continue
             if not jpeg:
                 continue
-            filename = f"{hashlib.sha1(record['guid'].encode()).hexdigest()[:16]}.jpg"
             (images_dir / filename).write_bytes(jpeg)
             return {
-                "guid": record["guid"],
+                "key": target["key"],
+                "notes": target["notes"],
                 "query": query,
                 "provider": provider_name,
                 "source_url": url,
@@ -255,10 +256,10 @@ def fetch_one(record: dict, images_dir: Path, allow_placeholder: bool) -> dict |
     if not allow_placeholder:
         return None
     jpeg = placeholder(query)
-    filename = f"{hashlib.sha1(record['guid'].encode()).hexdigest()[:16]}.jpg"
     (images_dir / filename).write_bytes(jpeg)
     return {
-        "guid": record["guid"],
+        "key": target["key"],
+        "notes": target["notes"],
         "query": query,
         "provider": "placeholder",
         "source_url": None,
@@ -268,69 +269,109 @@ def fetch_one(record: dict, images_dir: Path, allow_placeholder: bool) -> dict |
     }
 
 
+def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
+    """Collapse notes onto shared concepts, most-reused concept first.
+
+    With a fetch budget, spending it on the concept that covers 40 cards beats
+    spending it on 40 one-off sentences.
+    """
+    grouped: dict[str, dict] = {}
+    for record in notes:
+        tag = tags.get(record["guid"])
+        if tag:
+            key, query = tag.get("concept_key", ""), tag.get("query", "")
+        else:  # no tagging pass available -- fall back to the raw sentence
+            query = build_query(record)
+            key = query.lower()
+        if not key or not query:
+            continue
+        entry = grouped.setdefault(key, {"key": key, "query": query, "notes": 0})
+        entry["notes"] += 1
+    return sorted(grouped.values(), key=lambda t: -t["notes"])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--notes", type=Path, default=Path("data/notes.json"))
+    ap.add_argument("--tags", type=Path, default=Path("data/tags.json"))
     ap.add_argument("--manifest", type=Path, default=Path("data/images.json"))
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
-    ap.add_argument("--limit", type=int, default=0, help="only process N missing notes (0 = all)")
+    ap.add_argument("--limit", type=int, default=0, help="only fetch N missing concepts (0 = all)")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--no-placeholder", action="store_true")
     ap.add_argument("--retry-placeholders", action="store_true",
-                    help="re-search notes that previously fell back to a placeholder")
+                    help="re-search concepts that previously fell back to a placeholder")
     args = ap.parse_args()
 
     notes = json.loads(args.notes.read_text(encoding="utf-8"))["notes"]
-    args.images_dir.mkdir(parents=True, exist_ok=True)
+    tags = {}
+    if args.tags.exists():
+        tags = json.loads(args.tags.read_text(encoding="utf-8")).get("tags", {})
+    else:
+        print(f"note: {args.tags} not found, falling back to raw-sentence queries")
 
+    targets = build_targets(notes, tags)
+    covered = sum(t["notes"] for t in targets)
+    print(
+        f"{len(notes):,} notes -> {len(targets):,} distinct concepts "
+        f"covering {covered:,} notes ({covered / max(len(notes), 1):.0%})"
+    )
+
+    args.images_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, dict] = {}
     if args.manifest.exists():
         manifest = json.loads(args.manifest.read_text(encoding="utf-8")).get("images", {})
 
-    def needs_fetch(record: dict) -> bool:
-        entry = manifest.get(record["guid"])
+    def needs_fetch(target: dict) -> bool:
+        entry = manifest.get(target["key"])
         if not entry:
             return True
         if not (args.images_dir / entry["file"]).exists():
             return True
         return args.retry_placeholders and entry.get("provider") == "placeholder"
 
-    pending = [r for r in notes if needs_fetch(r)]
+    pending = [t for t in targets if needs_fetch(t)]
     if args.limit:
         pending = pending[: args.limit]
-    print(f"{len(notes)} notes, {len(notes) - len(pending)} already cached, fetching {len(pending)}")
+    print(f"{len(targets) - len(pending):,} already cached, fetching {len(pending):,}")
 
-    def worker(record: dict) -> dict | None:
+    def worker(target: dict) -> dict | None:
         time.sleep(random.uniform(0.1, 0.5))  # be polite to the free endpoints
         try:
-            return fetch_one(record, args.images_dir, not args.no_placeholder)
+            return fetch_one(target, args.images_dir, not args.no_placeholder)
         except Exception as exc:
-            print(f"  failed {record['guid']}: {exc}", file=sys.stderr)
+            print(f"  failed {target['key']}: {exc}", file=sys.stderr)
             return None
+
+    def save() -> None:
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.write_text(
+            json.dumps({"images": manifest}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     done = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for result in pool.map(worker, pending):
             done += 1
             if result:
-                manifest[result["guid"]] = result
+                manifest[result["key"]] = result
             if done % 25 == 0 or done == len(pending):
-                print(f"  {done}/{len(pending)}")
-                args.manifest.parent.mkdir(parents=True, exist_ok=True)
-                args.manifest.write_text(
-                    json.dumps({"images": manifest}, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    args.manifest.write_text(
-        json.dumps({"images": manifest}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+                print(f"  {done:,}/{len(pending):,}")
+                save()
+    save()
 
     by_provider: dict[str, int] = {}
     for entry in manifest.values():
         by_provider[entry["provider"]] = by_provider.get(entry["provider"], 0) + 1
-    print(f"manifest now covers {len(manifest)}/{len(notes)} notes: {by_provider}")
+    notes_with_image = sum(
+        t["notes"] for t in targets if t["key"] in manifest
+    )
+    print(
+        f"manifest covers {len(manifest):,}/{len(targets):,} concepts "
+        f"= {notes_with_image:,}/{len(notes):,} notes ({notes_with_image / max(len(notes), 1):.0%})"
+    )
+    print(f"  by provider: {by_provider}")
 
 
 if __name__ == "__main__":

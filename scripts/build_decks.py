@@ -166,6 +166,7 @@ def ensure_image(entry: dict, images_dir: Path) -> Path | None:
 def build(
     notes: list[dict],
     images: dict[str, dict],
+    tags: dict[str, dict],
     source_media: Path,
     images_dir: Path,
     staging: Path,
@@ -204,7 +205,9 @@ def build(
             used_audio += 1
 
         image_html = ""
-        entry = images.get(record["guid"])
+        # Notes that reduced to the same concept share one image.
+        concept_key = (tags.get(record["guid"]) or {}).get("concept_key", "")
+        entry = images.get(concept_key) if concept_key else None
         local = ensure_image(entry, images_dir)
         if local and local.exists():
             dest = staging / local.name
@@ -245,6 +248,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--notes", type=Path, default=Path("data/notes.json"))
     ap.add_argument("--manifest", type=Path, default=Path("data/images.json"))
+    ap.add_argument("--tags", type=Path, default=Path("data/tags.json"))
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
     ap.add_argument("--source-media", type=Path, default=Path("build/source_media"))
     ap.add_argument("--out-dir", type=Path, default=Path("dist"))
@@ -256,7 +260,16 @@ def main() -> None:
     images = {}
     if args.manifest.exists():
         images = json.loads(args.manifest.read_text(encoding="utf-8")).get("images", {})
-    print(f"{len(notes)} notes, {len(images)} images in manifest")
+    tags = {}
+    if args.tags.exists():
+        tags = json.loads(args.tags.read_text(encoding="utf-8")).get("tags", {})
+    reachable = sum(
+        1 for n in notes if (tags.get(n["guid"]) or {}).get("concept_key") in images
+    )
+    print(
+        f"{len(notes):,} notes, {len(images):,} images in manifest, "
+        f"{reachable:,} notes resolve to an image"
+    )
 
     for variant, deck_name, filename in (
         ("forward", args.forward_name, "spanish_es-en_hinted-image.apkg"),
@@ -265,6 +278,7 @@ def main() -> None:
         build(
             notes=notes,
             images=images,
+            tags=tags,
             source_media=args.source_media,
             images_dir=args.images_dir,
             staging=Path("build/media_staging") / variant,

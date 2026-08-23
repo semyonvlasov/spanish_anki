@@ -9,3 +9,4 @@ __pycache__/
 # published as a CI artifact instead. data/images.json IS tracked -- it is the
 # link manifest that lets git carry references instead of the JPEGs.
 data/notes.json
+data/tags.json

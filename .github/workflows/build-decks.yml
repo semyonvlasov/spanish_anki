@@ -58,6 +58,9 @@ jobs:
       - name: Unpack
         run: python scripts/unpack.py
 
+      - name: Tag notes into searchable concepts
+        run: python scripts/tag_notes.py --sample 20
+
       - name: Report scale
         run: python scripts/estimate.py | tee scale-report.txt
 
@@ -67,6 +70,7 @@ jobs:
           name: notes
           path: |
             data/notes.json
+            data/tags.json
             scale-report.txt
 
       - name: Stop after inspection
@@ -150,4 +154,5 @@ jobs:
             --notes-file release-notes.md \
             dist/spanish_es-en_hinted-image.apkg \
             dist/spanish_en-es_hinted-audio.apkg \
+            data/tags.json \
             /tmp/images.zip
