@@ -291,6 +291,8 @@ def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
 
 
 def main() -> None:
+    global MAX_EDGE
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--notes", type=Path, default=Path("data/notes.json"))
     ap.add_argument("--tags", type=Path, default=Path("data/tags.json"))
@@ -305,7 +307,6 @@ def main() -> None:
                     help="re-search concepts that previously fell back to a placeholder")
     args = ap.parse_args()
 
-    global MAX_EDGE
     MAX_EDGE = args.max_edge
     print(f"normalising images to {MAX_EDGE}px on the longest edge")
 
