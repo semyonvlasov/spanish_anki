@@ -300,6 +300,10 @@ def main() -> None:
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
     ap.add_argument("--limit", type=int, default=0, help="only fetch N missing concepts (0 = all)")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--time-budget", type=float, default=0.0,
+                    help="stop fetching after this many minutes and keep what was found; "
+                         "0 = no limit. Turns a hard job timeout, which loses everything, "
+                         "into a partial build that still ships.")
     ap.add_argument("--max-edge", type=int, default=MAX_EDGE,
                     help="longest image edge in pixels; drives the finished deck's size")
     ap.add_argument("--no-placeholder", action="store_true")
@@ -370,15 +374,35 @@ def main() -> None:
             encoding="utf-8",
         )
 
+    started = time.monotonic()
+    budget = args.time_budget * 60
+    stopping = False
+
+    def worker_guarded(target: dict) -> dict | None:
+        # pool.map cannot be cancelled, so past the budget the remaining
+        # targets fall through cheaply instead of hitting the network.
+        if stopping:
+            return None
+        return worker(target)
+
     done = 0
+    fetched = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for result in pool.map(worker, pending):
+        for result in pool.map(worker_guarded, pending):
             done += 1
             if result:
                 manifest[result["key"]] = result
+                fetched += 1
             if done % 25 == 0 or done == len(pending):
-                print(f"  {done:,}/{len(pending):,}")
+                elapsed = time.monotonic() - started
+                rate = fetched / elapsed if elapsed else 0
+                print(f"  {done:,}/{len(pending):,} attempted, {fetched:,} found, "
+                      f"{rate:.1f}/s, {elapsed / 60:.0f} min elapsed", flush=True)
                 save()
+            if budget and not stopping and time.monotonic() - started > budget:
+                print(f"  time budget of {args.time_budget:.0f} min reached -- "
+                      f"stopping with {fetched:,} found; re-run to continue", flush=True)
+                stopping = True
     save()
 
     by_provider: dict[str, int] = {}

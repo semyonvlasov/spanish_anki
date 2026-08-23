@@ -27,6 +27,9 @@ on:
       upgrade_from:
         description: "Re-search hits from these providers, e.g. 'openverse' after adding a better API key"
         default: ""
+      time_budget:
+        description: "Minutes to spend fetching before settling for what was found (0 = no limit)"
+        default: "120"
       min_coverage:
         description: "Fail a full build if fewer than this share of concepts got an image (0-1)"
         default: "0.35"
@@ -151,6 +154,7 @@ jobs:
           python scripts/fetch_images.py \
             --limit "${{ inputs.image_limit }}" \
             --max-edge "${{ inputs.max_edge }}" \
+            --time-budget "${{ inputs.time_budget }}" \
             --workers 4 \
             $EXTRA
 
