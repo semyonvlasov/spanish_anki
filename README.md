@@ -37,6 +37,7 @@ download_deck.py -> unpack.py -> tag_notes.py -> fetch_images.py -> gdrive_sync.
 | `scripts/fetch_images.py` | one image per **concept**, tried across several providers, normalised to JPEG |
 | `scripts/gdrive_sync.py` | mirrors the image cache to Google Drive so git only carries links |
 | `scripts/build_decks.py` | writes both `.apkg` files |
+| `scripts/verify_decks.py` | resolves every media reference in a built deck against the package's own media table |
 
 ### Running it locally
 
@@ -48,16 +49,28 @@ python scripts/tag_notes.py --sample 20
 python scripts/estimate.py          # check the scale before committing to a long run
 python scripts/fetch_images.py --limit 200
 python scripts/build_decks.py       # -> dist/*.apkg
+python scripts/verify_decks.py      # fails if any note points at missing media
 ```
 
 ### Running it in CI
 
 `.github/workflows/build-decks.yml`, triggered manually from the Actions tab:
 
-* `stage: inspect` — downloads, unpacks and reports how many notes there are
-  and what a full image pass would cost. Nothing is built.
-* `stage: full` — additionally fetches images, builds both decks and publishes
-  them to a release, reusing the image cache attached to the previous release.
+* `stage: inspect` — downloads, unpacks, tags and reports how many notes and
+  concepts there are and what a full image pass would cost. Nothing is built.
+* `stage: smoke` — fetches a couple of dozen images, prints which provider
+  answered each query and uploads the results as an artifact. Use it to judge
+  the image search in two minutes rather than an hour.
+* `stage: full` — additionally fetches every image, verifies the built decks
+  and publishes them to a release, reusing the image cache attached to the
+  previous release.
+
+Useful inputs: `max_edge` (image size, and so most of the deck's size),
+`image_limit` (fetch only the N most-reused concepts), `upgrade_from`
+(re-search hits from named providers after adding an API key) and
+`min_coverage` — a full build refuses to publish if the fetch covered less
+than that share of concepts, so a provider outage cannot quietly ship two
+decks with no images.
 
 The source deck is cached between runs, so only the first run pays the 247 MB
 download.
@@ -110,8 +123,25 @@ Providers are tried in order and the first usable hit wins:
 
 1. Pexels, Unsplash, Pixabay — best quality, need a free API key in
    `PEXELS_API_KEY` / `UNSPLASH_ACCESS_KEY` / `PIXABAY_API_KEY`
-2. DuckDuckGo images — no key, best coverage for whole phrases
+2. DuckDuckGo images — no key
 3. Openverse, Wikimedia Commons — no key, openly licensed
+
+**What actually happens with no API key set:** a smoke run from a GitHub
+runner returned Openverse for all 24 queries and nothing at all from
+DuckDuckGo, which blocks datacenter addresses. So without a key the deck rests
+on Openverse's openly-licensed corpus — fine for concrete nouns, thin for
+abstract ones. Adding a key is the single biggest quality lever, and the
+per-provider quotas differ enough to matter over 5.5k queries:
+
+| provider | free quota | 5,556 queries |
+|---|---|---|
+| Pixabay | 100 / minute | ~1 hour — the practical choice |
+| Pexels | 200 / hour | ~28 hours, so several runs |
+| Unsplash | 50 / hour (demo) | not viable alone |
+
+Set `PIXABAY_API_KEY` in the repository secrets, then re-run with
+`upgrade_from: openverse` to replace the weaker hits while keeping everything
+else in the cache.
 
 With `--no-placeholder` a note that matches nothing is simply left without an
 image; otherwise a plain typographic card is generated so a build never breaks.
