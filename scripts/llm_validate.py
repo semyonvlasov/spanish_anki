@@ -52,21 +52,21 @@ REQUERY_SYSTEM = """You repair a failed image search for a language-learning fla
 A search was run, a picture came back, and a reviewer rejected it. You get the
 sentence, the query that was used and why the picture was rejected.
 
-The first search was a short keyword query, and shortness is usually what
-failed: "feeling like idiot" is an abstraction no photograph carries, so a
-library answers it with whatever happens to be tagged that way. Do not write
-another short query. Describe the scene a photograph would have to show --
-who is in it and what they are visibly doing -- so that the words name things
-a camera can record.
+What failed was abstraction, not brevity. "feeling like idiot" names a state of
+mind, and a photo library has nothing filed under it, so it returns whatever
+happens to carry the words. Keep the query just as short, but move it to
+something a camera can point at: the gesture, the object, the moment that
+stands for the idea.
 
-  query     the scene, 4 to 8 words. Concrete, visible, no abstract nouns.
-  fallback  2 or 3 words naming the most photographable thing in that scene,
-            used if the longer query finds nothing
+  query     2 or 3 words naming something photographable. Never reuse the
+            abstract word that failed. Never describe a scene in a sentence --
+            long queries return nothing.
+  fallback  1 or 2 words, the single most photographable object in it
   skip      true only when nothing observable could stand for the sentence
 
-Be decisive about skip, but reach for a scene first: an emotion has a posture,
-an event has a moment. Skip belongs to sentences about language itself, or
-about opinion and permission, where any picture would mislead.
+An emotion has a gesture. An event has an object. Reach for that before
+skipping. Skip belongs to sentences about language, opinion or permission,
+where any picture misleads.
 
 When the thing exists but the library lacks it (a rotten pear), go to the
 nearest thing that is still true ("rotten fruit"), never a different thing.
@@ -76,16 +76,13 @@ Reply with JSON only: {"query": "...", "fallback": "...", "skip": false}"""
 REQUERY_EXAMPLES = [
     ("The image shows a fish, not a person feeling like an idiot.",
      "feeling like idiot",
-     {"query": "man covering face with hand in embarrassment",
-      "fallback": "embarrassed man", "skip": False}),
+     {"query": "facepalm", "fallback": "facepalm", "skip": False}),
     ("The image shows money, not the act of earning it.",
      "money earning",
-     {"query": "worker receiving pay envelope at work",
-      "fallback": "paying wages", "skip": False}),
+     {"query": "counting cash", "fallback": "banknotes", "skip": False}),
     ("The image is text-heavy.",
      "person fired",
-     {"query": "employee leaving office carrying cardboard box",
-      "fallback": "packing desk", "skip": False}),
+     {"query": "empty office desk", "fallback": "cardboard box", "skip": False}),
 ]
 
 
@@ -112,7 +109,7 @@ def post(body: dict, api_key: str) -> dict | None:
     return None
 
 
-MIN_SCENE_WORDS = 4  # "person embarrassed" is the abstraction again, just shorter
+MAX_QUERY_WORDS = 3  # long queries return nothing, and make Pexels answer 500
 
 
 def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str) -> dict:
@@ -142,22 +139,20 @@ def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str
         )
 
     parsed, new, fallback = attempt(conversation)
-    short = bool(new) and len(new.split()) < MIN_SCENE_WORDS
 
-    # Another two-word abstraction is the failure repeating itself; say so and
-    # ask once more rather than searching for it.
-    if short and not parsed.get("skip"):
+    # A sentence-shaped answer is the other way to fail: those find nothing.
+    if new and len(new.split()) > MAX_QUERY_WORDS and not parsed.get("skip"):
         parsed, retried, retried_fallback = attempt(conversation + [
             {"role": "assistant", "content": json.dumps(parsed, ensure_ascii=False)},
             {"role": "user", "content":
-                f'"{new}" is still a short abstract phrase, which is what failed. '
-                f"Describe what would be visible in the photograph -- who is there and "
-                f"what they are doing -- in at least {MIN_SCENE_WORDS} words."},
+                f'"{new}" is a described scene. Stock libraries return nothing for those. '
+                f"Name the gesture or object itself, in at most {MAX_QUERY_WORDS} words."},
         ])
-        if retried and len(retried.split()) >= MIN_SCENE_WORDS:
-            new, fallback = retried, (retried_fallback or fallback or new)
+        if retried and len(retried.split()) <= MAX_QUERY_WORDS:
+            new, fallback = retried, (retried_fallback or fallback)
         else:
-            fallback = fallback or new
+            # Keep it usable rather than searching for a sentence.
+            new = fallback or " ".join(new.split()[:MAX_QUERY_WORDS])
 
     if parsed.get("_error") or parsed.get("skip"):
         return {"query": "", "fallback": "", "skip": True}
@@ -173,7 +168,7 @@ def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str
         "query": new,
         "fallback": fallback,
         "skip": False,
-        "short": len(new.split()) < MIN_SCENE_WORDS,
+        "too_long": len(new.split()) > MAX_QUERY_WORDS,
     }
 
 
@@ -272,8 +267,8 @@ def main() -> None:
         repair = requery(sentence, term, answer["reason"], args.model, api_key)
         record["new_query"] = repair["query"]
         record["scene_words"] = len(repair["query"].split())
-        if repair.get("short"):
-            record["still_short"] = True
+        if repair.get("too_long"):
+            record["still_long"] = True
         if repair["skip"]:
             image["dropped"] = True
             record["outcome"] = "dropped"
@@ -314,7 +309,7 @@ def main() -> None:
     total = len(log)
     rejected = sum(1 for r in log if r["verdict"] == "reject")
     requeried = sum(1 for r in log if r.get("outcome") == "requeried")
-    still_short = sum(1 for r in log if r.get("still_short"))
+    still_long = sum(1 for r in log if r.get("still_long"))
     scene_lengths = [r["scene_words"] for r in log if r.get("scene_words")]
     dropped = sum(1 for r in log if r.get("outcome") == "dropped")
     unchecked = sum(1 for r in log if r["reason"].startswith("not checked"))
@@ -334,7 +329,7 @@ def main() -> None:
     args.report.write_text(json.dumps({
         "model": args.model, "requery": args.requery, "checked": total,
         "rejected": rejected, "requeried": requeried, "dropped": dropped,
-        "still_short": still_short,
+        "still_long": still_long,
         "concepts_left_without_a_picture": len(empty), "details": log,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -346,9 +341,9 @@ def main() -> None:
         print(f"  searched again, new query : {requeried:,}")
         if scene_lengths:
             print(f"    new query length        : {sum(scene_lengths)/len(scene_lengths):.1f} words "
-                  f"on average (was 2-3)")
-        if still_short:
-            print(f"    still too short         : {still_short:,} (model would not elaborate)")
+                  f"on average (cap {MAX_QUERY_WORDS})")
+        if still_long:
+            print(f"    still sentence-shaped   : {still_long:,}")
         print(f"  gave up, no picture       : {dropped:,}")
         print(f"concepts left with none     : {len(empty):,}")
     if unchecked:
