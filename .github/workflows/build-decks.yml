@@ -50,6 +50,9 @@ on:
       time_budget:
         description: "Minutes to spend fetching before settling for what was found (0 = no limit)"
         default: "120"
+      judge_budget:
+        description: "Minutes to spend judging pictures before keeping the rest unjudged (0 = no limit)"
+        default: "60"
       min_coverage:
         description: "Fail a full build if fewer than this share of concepts got an image (0-1)"
         default: "0.35"
@@ -282,7 +285,9 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: PYTHONPATH=scripts python scripts/llm_validate.py --requery --workers 6
+        run: |
+          PYTHONPATH=scripts python scripts/llm_validate.py \
+            --requery --workers 6 --time-budget "${{ inputs.judge_budget }}"
 
       # Judging replaces pictures and rewrites the manifest, so save again.
       - name: Preserve the cache after judging

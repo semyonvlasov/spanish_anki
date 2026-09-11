@@ -256,6 +256,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--requery", action="store_true",
                     help="turn each rejection into a fresh query and search again, once")
+    ap.add_argument("--time-budget", type=float, default=0.0,
+                    help="stop judging after this many minutes and keep the rest unjudged; "
+                         "0 = no limit. An unjudged picture is kept, never dropped.")
     args = ap.parse_args()
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -283,8 +286,17 @@ def main() -> None:
 
     log: list[dict] = []
 
+    started = time.monotonic()
+    budget = args.time_budget * 60
+    state = {"stopping": False}
+
     def check(job) -> dict:
         key, index, image = job
+        if state["stopping"]:
+            # Out of time: leave the picture alone rather than judging it badly.
+            return {"key": key, "index": index, "term": image.get("term") or "",
+                    "verdict": "ok", "reason": "not checked: out of time",
+                    "outcome": "kept", "unchecked": True}
         sentence = sentence_for.get(key, "")
         term = image.get("term") or ""
         is_part = len(entry_images(manifest[key])) > 1
@@ -344,8 +356,13 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for done, record in enumerate(pool.map(check, jobs), start=1):
             log.append(record)
-            if done % 10 == 0 or done == len(jobs):
-                print(f"  {done}/{len(jobs)}", flush=True)
+            if done % 25 == 0 or done == len(jobs):
+                elapsed = (time.monotonic() - started) / 60
+                print(f"  {done:,}/{len(jobs):,} judged, {elapsed:.0f} min elapsed", flush=True)
+            if budget and not state["stopping"] and time.monotonic() - started > budget:
+                print(f"  time budget of {args.time_budget:.0f} min reached -- "
+                      f"leaving the remaining pictures unjudged", flush=True)
+                state["stopping"] = True
 
     total = len(log)
     rejected = sum(1 for r in log if r["verdict"] == "reject")
@@ -354,6 +371,7 @@ def main() -> None:
     scene_lengths = [r["scene_words"] for r in log if r.get("scene_words")]
     dropped = sum(1 for r in log if r.get("outcome") == "dropped")
     unchecked = sum(1 for r in log if r["reason"].startswith("not checked"))
+    out_of_time = sum(1 for r in log if r.get("unchecked"))
 
     # Pictures the model gave up on must not reach the deck.
     for entry in manifest.values():
@@ -388,7 +406,8 @@ def main() -> None:
         print(f"  gave up, no picture       : {dropped:,}")
         print(f"concepts left with none     : {len(empty):,}")
     if unchecked:
-        print(f"could not reach the model   : {unchecked:,} (kept, not dropped)")
+        print(f"not judged                  : {unchecked:,} (kept, not dropped)"
+              + (f", {out_of_time:,} of them for lack of time" if out_of_time else ""))
     print("=" * 58)
     print()
     print("every rejection, and what was done about it:")
