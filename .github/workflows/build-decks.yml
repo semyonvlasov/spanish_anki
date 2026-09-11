@@ -180,7 +180,7 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: PYTHONPATH=scripts python scripts/llm_validate.py --refetch --workers 4
+        run: PYTHONPATH=scripts python scripts/llm_validate.py --requery --workers 4
 
       - name: Contact sheet, after validation
         if: inputs.stage == 'sample' && inputs.validate_images

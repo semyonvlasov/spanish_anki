@@ -55,7 +55,15 @@ def main() -> None:
                 continue
             verdict = image.get("verdict")
             badge = ""
-            if verdict:
+            if image.get("requeried_from"):
+                # Judged once, rejected, searched again on a new query.
+                badge = (
+                    f'<span class="v requeried">searched again</span>'
+                    f'<span class="why">was: {html.escape(image["requeried_from"])}<br>'
+                    f'rejected: {html.escape(image.get("reason") or "")}</span>'
+                )
+                verdict = "requeried"
+            elif verdict:
                 label = "kept" if verdict == "ok" else "rejected"
                 badge = (f'<span class="v {verdict}">{label}</span>'
                          f'<span class="why">{html.escape(image.get("reason") or "")}</span>')
@@ -84,8 +92,9 @@ def main() -> None:
     verdicts: dict[str, int] = {}
     for entry in images.values():
         for image in entry_images(entry):
-            if image.get("verdict"):
-                verdicts[image["verdict"]] = verdicts.get(image["verdict"], 0) + 1
+            label = "requeried" if image.get("requeried_from") else image.get("verdict")
+            if label:
+                verdicts[label] = verdicts.get(label, 0) + 1
     verdict_line = (f' &middot; verdicts: {verdicts}' if verdicts else "")
 
     page = f"""<!doctype html>
@@ -109,6 +118,8 @@ figcaption span {{ opacity:.65; }}
 .v {{ display:block; margin-top:3px; font-weight:600; opacity:1; }}
 .v.ok {{ color:#2f7d4f; }}
 .v.reject {{ color:#b03030; }}
+.v.requeried {{ color:#8a5a13; }}
+figure.requeried img {{ outline:3px solid #d9a441; }}
 .why {{ display:block; max-width:230px; font-size:11px; opacity:.8; }}
 figure.reject img {{ outline:3px solid #d46a6a; }}
 @media (max-width:760px) {{ article {{ grid-template-columns:1fr; }} }}

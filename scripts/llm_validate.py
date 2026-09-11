@@ -30,10 +30,10 @@ DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 SYSTEM = """You check whether a photograph is usable on a language-learning flashcard.
 
-You are given the sentence the card teaches and one picture. Answer:
+You are given what the picture is meant to show, and the picture. Answer:
 
-  verdict  "ok" if the picture shows what the sentence is about closely enough
-           that a learner would connect the two, "reject" otherwise
+  verdict  "ok" if the picture shows that closely enough that a learner would
+           connect the two, "reject" otherwise
   reason   one short clause saying why
 
 Reject a picture that is merely topically adjacent -- a keyboard for "writing a
@@ -41,27 +41,37 @@ letter", a stock businessman for "elderly man". Reject text-heavy images,
 screenshots, logos, collages and charts. Accept a picture that shows the idea
 even if the details differ; it is a memory aid, not an illustration.
 
+Judge the picture ONLY against what it is meant to show. When the card carries
+two pictures, each one carries half the idea: do not reject a picture for
+missing what the other one is there to supply.
+
 Reply with JSON only: {"verdict": "...", "reason": "..."}"""
+
+REQUERY_SYSTEM = """You repair a failed image search for a language-learning flashcard.
+
+A search was run, a picture came back, and a reviewer rejected it. You get the
+sentence, the query that was used and why the picture was rejected. Answer:
+
+  query  a different search query, 2-4 words, concrete and visual, that avoids
+         the stated problem. Do not repeat the old query.
+  skip   true when the idea simply cannot be photographed, and any picture
+         would mislead more than it helps
+
+Be decisive about skip. Abstractions -- belonging, truth, names, doubt,
+permission, politeness -- have no photograph. A stock library will answer such
+a query with motivational text on a background, which is worse than no picture.
+
+When the thing does exist but the library lacks it (a rotten pear), prefer the
+nearest thing that is still correct ("rotten fruit"), never a different thing.
+
+Reply with JSON only: {"query": "...", "skip": false}"""
 
 
 def encode(path: Path) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
 
 
-def ask(sentence: str, query: str, image_path: Path, model: str, api_key: str) -> dict:
-    body = {
-        "model": model,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": [
-                {"type": "text",
-                 "text": f"Sentence: {sentence}\nThe picture was found by searching: {query}"},
-                {"type": "image_url", "image_url": {"url": encode(image_path)}},
-            ]},
-        ],
-    }
+def post(body: dict, api_key: str) -> dict | None:
     headers = {"Authorization": f"Bearer {api_key}", "X-Title": "spanish-anki-deck-builder"}
     for attempt in range(3):
         try:
@@ -72,18 +82,64 @@ def ask(sentence: str, query: str, image_path: Path, model: str, api_key: str) -
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M).strip()
-            parsed = json.loads(content)
-            verdict = str(parsed.get("verdict", "")).lower()
-            return {
-                "verdict": "reject" if verdict.startswith("reject") else "ok",
-                "reason": str(parsed.get("reason", ""))[:200],
-            }
+            return json.loads(content)
         except Exception as exc:
             if attempt == 2:
-                # An unreachable judge must not silently delete pictures.
-                return {"verdict": "ok", "reason": f"not checked: {exc}"[:200]}
+                return {"_error": str(exc)}
             time.sleep(2 * (attempt + 1))
-    return {"verdict": "ok", "reason": "not checked"}
+    return None
+
+
+def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str) -> dict:
+    """Turn a rejection into a better query, or a decision not to try again."""
+    parsed = post({
+        "model": model,
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": REQUERY_SYSTEM},
+            {"role": "user", "content":
+                f"Sentence: {sentence}\nQuery used: {old_query}\nRejected because: {reason}"},
+        ],
+    }, api_key) or {}
+    if parsed.get("_error") or parsed.get("skip"):
+        return {"query": "", "skip": True}
+    new = " ".join(str(parsed.get("query", "")).split())[:80]
+    if not new or new.lower() == old_query.lower():
+        return {"query": "", "skip": True}
+    return {"query": new, "skip": False}
+
+
+def ask(sentence: str, query: str, image_path: Path, model: str, api_key: str,
+        is_part: bool = False) -> dict:
+    if is_part:
+        brief = (f'This picture is one of two on the card. It is meant to show only: "{query}".\n'
+                 f'For context, the card teaches: {sentence}\n'
+                 f'Judge it against "{query}" alone.')
+    else:
+        brief = f'The picture is meant to show: "{query}".\nThe card teaches: {sentence}'
+
+    parsed = post({
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": [
+                {"type": "text", "text": brief},
+                {"type": "image_url", "image_url": {"url": encode(image_path)}},
+            ]},
+        ],
+    }, api_key) or {}
+
+    if parsed.get("_error") is not None or "verdict" not in parsed:
+        # An unreachable judge must not silently delete pictures.
+        return {"verdict": "ok", "reason": f"not checked: {parsed.get('_error', 'no verdict')}"[:200]}
+    verdict = str(parsed.get("verdict", "")).lower()
+    return {
+        "verdict": "reject" if verdict.startswith("reject") else "ok",
+        "reason": str(parsed.get("reason", ""))[:200],
+    }
 
 
 def main() -> None:
@@ -95,9 +151,8 @@ def main() -> None:
     ap.add_argument("--report", type=Path, default=Path("build/validation-report.json"))
     ap.add_argument("--model", default=os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL))
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--refetch", action="store_true",
-                    help="replace a rejected picture with the next candidate and re-check it")
-    ap.add_argument("--max-attempts", type=int, default=3)
+    ap.add_argument("--requery", action="store_true",
+                    help="turn each rejection into a fresh query and search again, once")
     args = ap.parse_args()
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -129,36 +184,47 @@ def main() -> None:
         key, index, image = job
         sentence = sentence_for.get(key, "")
         term = image.get("term") or ""
-        tried = {image.get("source_url")} - {None}
-        record = {"key": key, "index": index, "term": term, "attempts": []}
+        is_part = len(entry_images(manifest[key])) > 1
+        record = {"key": key, "index": index, "term": term, "is_part": is_part}
 
-        for attempt in range(args.max_attempts):
-            path = args.images_dir / image["file"]
-            if not path.exists():
-                record["final"] = "missing"
-                return record
-            answer = ask(sentence, term, path, args.model, api_key)
-            record["attempts"].append({
-                "file": image["file"], "provider": image.get("provider"),
-                "verdict": answer["verdict"], "reason": answer["reason"],
-            })
-            image["verdict"] = answer["verdict"]
-            image["reason"] = answer["reason"]
-            if answer["verdict"] == "ok" or not args.refetch or attempt == args.max_attempts - 1:
-                record["final"] = answer["verdict"]
-                return record
+        answer = ask(sentence, term, args.images_dir / image["file"], args.model, api_key, is_part) \
+            if (args.images_dir / image["file"]).exists() else {"verdict": "ok", "reason": "file missing"}
+        image["verdict"] = answer["verdict"]
+        image["reason"] = answer["reason"]
+        record["verdict"] = answer["verdict"]
+        record["reason"] = answer["reason"]
 
-            replacement = fetch_single(
-                term, args.images_dir / image["file"], time.monotonic() + PER_CONCEPT_DEADLINE,
-                exclude=tried,
-            )
-            if not replacement:
-                record["final"] = "reject"
-                record["exhausted"] = True
-                return record
-            tried.add(replacement["source_url"])
-            image.update(replacement)
-        record["final"] = image.get("verdict", "ok")
+        if answer["verdict"] == "ok" or not args.requery:
+            record["outcome"] = "kept" if answer["verdict"] == "ok" else "rejected"
+            return record
+
+        # One round of judging: a rejection buys a new query, not another
+        # candidate for the query that just failed. The reasons showed the
+        # query is usually what is wrong, and the next photo for a bad query
+        # is wrong in the same way.
+        repair = requery(sentence, term, answer["reason"], args.model, api_key)
+        record["new_query"] = repair["query"]
+        if repair["skip"]:
+            image["dropped"] = True
+            record["outcome"] = "dropped"
+            return record
+
+        replacement = fetch_single(
+            repair["query"], args.images_dir / image["file"],
+            time.monotonic() + PER_CONCEPT_DEADLINE,
+        )
+        if not replacement:
+            image["dropped"] = True
+            record["outcome"] = "dropped"
+            record["note"] = "the new query found nothing either"
+            return record
+
+        image.update(replacement)
+        image["term"] = repair["query"]
+        image["requeried_from"] = term
+        image["reason"] = answer["reason"]
+        image.pop("verdict", None)          # deliberately not judged again
+        record["outcome"] = "requeried"
         return record
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -167,48 +233,53 @@ def main() -> None:
             if done % 10 == 0 or done == len(jobs):
                 print(f"  {done}/{len(jobs)}", flush=True)
 
-    first_pass_rejects = sum(1 for r in log if r["attempts"] and r["attempts"][0]["verdict"] == "reject")
-    final_rejects = sum(1 for r in log if r.get("final") == "reject")
-    rescued = first_pass_rejects - final_rejects
     total = len(log)
-    # Distinguish "the retries were also bad" from "there were no retries".
-    retried = sum(1 for r in log if len(r["attempts"]) > 1)
-    exhausted = sum(1 for r in log if r.get("exhausted"))
-    total_looks = sum(len(r["attempts"]) for r in log)
-    unchecked = sum(
-        1 for r in log for a in r["attempts"] if a["reason"].startswith("not checked")
-    )
+    rejected = sum(1 for r in log if r["verdict"] == "reject")
+    requeried = sum(1 for r in log if r.get("outcome") == "requeried")
+    dropped = sum(1 for r in log if r.get("outcome") == "dropped")
+    unchecked = sum(1 for r in log if r["reason"].startswith("not checked"))
+
+    # Pictures the model gave up on must not reach the deck.
+    for entry in manifest.values():
+        if entry.get("images"):
+            entry["images"] = [i for i in entry["images"] if not i.get("dropped")]
+    empty = [k for k, e in manifest.items() if not entry_images(e)]
+    for key in empty:
+        del manifest[key]
 
     args.manifest.write_text(
         json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
-        "model": args.model, "refetch": args.refetch, "checked": total,
-        "rejected_first_pass": first_pass_rejects, "rejected_final": final_rejects,
-        "replaced_successfully": rescued, "retried": retried, "exhausted": exhausted,
-        "total_judgements": total_looks, "details": log,
+        "model": args.model, "requery": args.requery, "checked": total,
+        "rejected": rejected, "requeried": requeried, "dropped": dropped,
+        "concepts_left_without_a_picture": len(empty), "details": log,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print()
     print("=" * 58)
     print(f"pictures checked            : {total:,}")
-    print(f"rejected on the first look  : {first_pass_rejects:,} "
-          f"({first_pass_rejects / max(total, 1):.0%})")
-    if args.refetch:
-        print(f"  a replacement was fetched : {retried:,} of those")
-        print(f"  providers had none left   : {exhausted:,}")
-        print(f"  replaced with a better one: {rescued:,}")
-        print(f"  still rejected after retry: {final_rejects:,}")
-    print(f"total judgements made       : {total_looks:,}"
-          + (f" ({unchecked:,} could not reach the model)" if unchecked else ""))
+    print(f"rejected by the model       : {rejected:,} ({rejected / max(total, 1):.0%})")
+    if args.requery:
+        print(f"  searched again, new query : {requeried:,}")
+        print(f"  gave up, no picture       : {dropped:,}")
+        print(f"concepts left with none     : {len(empty):,}")
+    if unchecked:
+        print(f"could not reach the model   : {unchecked:,} (kept, not dropped)")
     print("=" * 58)
     print()
-    print("what it rejected, and why:")
+    print("every rejection, and what was done about it:")
     for record in log:
-        for attempt in record["attempts"]:
-            if attempt["verdict"] == "reject":
-                print(f"  {record['term'][:34]:<34} [{attempt['provider']}] {attempt['reason'][:90]}")
+        if record["verdict"] != "reject":
+            continue
+        part = " (one of a pair)" if record.get("is_part") else ""
+        print(f"  {record['term'][:30]:<30}{part}")
+        print(f"      why      : {record['reason'][:88]}")
+        if record.get("outcome") == "requeried":
+            print(f"      retried as: {record['new_query']}")
+        else:
+            print(f"      dropped  : {record.get('note', 'nothing photographable')}")
 
 
 if __name__ == "__main__":
