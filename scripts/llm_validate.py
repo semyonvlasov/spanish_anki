@@ -45,6 +45,11 @@ is a clear sky. A half-eaten meal is a meal. Three apples are an apple. This
 is a memory aid on a flashcard, not an illustration in a dictionary, and the
 learner only has to recognise what it is.
 
+Do not demand what no photograph can establish. Nationality, kinship, whose
+something is, what a stranger does for a living -- none of these are visible.
+For "Japanese teacher" a photograph of a teacher is correct, and for "my
+brother" a photograph of a man is. Judge what is in the frame.
+
 Judge the picture ONLY against what it is meant to show. When the card carries
 two pictures, each one carries half the idea: do not reject a picture for
 missing what the other one is there to supply.
@@ -85,6 +90,10 @@ Never move to a cause or a consequence. Failed brakes are not a car crash, a
 missed train is not an empty platform at night. Stay on the object the sentence
 names, and drop any negation: "car brakes not working" -> "car brakes".
 
+Never reach for a symbol to carry an invisible attribute -- a flag does not
+make a teacher Japanese, and a ring does not make a man someone's husband.
+Drop the attribute and keep the thing: "Japanese teacher" -> "teacher".
+
 Never change which sense of a word is meant. "clear sky" is about the sky, so
 the repair is "blue sky" or "cloudless sky" -- never "transparent glass",
 which keeps the word and loses the subject. When the failed query names a
@@ -109,6 +118,9 @@ REQUERY_EXAMPLES = [
     ("The sky is not clear, there is a large cloud.",
      "clear sky",
      {"query": "blue sky", "fallback": "open sky", "skip": False}),
+    ("The picture shows a teacher, but there is nothing to indicate she is Japanese.",
+     "Japanese teacher",
+     {"query": "teacher classroom", "fallback": "teacher", "skip": False}),
 ]
 
 
