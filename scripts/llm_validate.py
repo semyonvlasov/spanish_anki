@@ -50,21 +50,43 @@ Reply with JSON only: {"verdict": "...", "reason": "..."}"""
 REQUERY_SYSTEM = """You repair a failed image search for a language-learning flashcard.
 
 A search was run, a picture came back, and a reviewer rejected it. You get the
-sentence, the query that was used and why the picture was rejected. Answer:
+sentence, the query that was used and why the picture was rejected.
 
-  query  a different search query, 2-4 words, concrete and visual, that avoids
-         the stated problem. Do not repeat the old query.
-  skip   true when the idea simply cannot be photographed, and any picture
-         would mislead more than it helps
+The first search was a short keyword query, and shortness is usually what
+failed: "feeling like idiot" is an abstraction no photograph carries, so a
+library answers it with whatever happens to be tagged that way. Do not write
+another short query. Describe the scene a photograph would have to show --
+who is in it and what they are visibly doing -- so that the words name things
+a camera can record.
 
-Be decisive about skip. Abstractions -- belonging, truth, names, doubt,
-permission, politeness -- have no photograph. A stock library will answer such
-a query with motivational text on a background, which is worse than no picture.
+  query     the scene, 4 to 8 words. Concrete, visible, no abstract nouns.
+  fallback  2 or 3 words naming the most photographable thing in that scene,
+            used if the longer query finds nothing
+  skip      true only when nothing observable could stand for the sentence
 
-When the thing does exist but the library lacks it (a rotten pear), prefer the
-nearest thing that is still correct ("rotten fruit"), never a different thing.
+Be decisive about skip, but reach for a scene first: an emotion has a posture,
+an event has a moment. Skip belongs to sentences about language itself, or
+about opinion and permission, where any picture would mislead.
 
-Reply with JSON only: {"query": "...", "skip": false}"""
+When the thing exists but the library lacks it (a rotten pear), go to the
+nearest thing that is still true ("rotten fruit"), never a different thing.
+
+Reply with JSON only: {"query": "...", "fallback": "...", "skip": false}"""
+
+REQUERY_EXAMPLES = [
+    ("The image shows a fish, not a person feeling like an idiot.",
+     "feeling like idiot",
+     {"query": "man covering face with hand in embarrassment",
+      "fallback": "embarrassed man", "skip": False}),
+    ("The image shows money, not the act of earning it.",
+     "money earning",
+     {"query": "worker receiving pay envelope at work",
+      "fallback": "paying wages", "skip": False}),
+    ("The image is text-heavy.",
+     "person fired",
+     {"query": "employee leaving office carrying cardboard box",
+      "fallback": "packing desk", "skip": False}),
+]
 
 
 def encode(path: Path) -> str:
@@ -90,24 +112,69 @@ def post(body: dict, api_key: str) -> dict | None:
     return None
 
 
+MIN_SCENE_WORDS = 4  # "person embarrassed" is the abstraction again, just shorter
+
+
 def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str) -> dict:
-    """Turn a rejection into a better query, or a decision not to try again."""
-    parsed = post({
-        "model": model,
-        "temperature": 0.3,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": REQUERY_SYSTEM},
+    """Turn a rejection into a described scene, or a decision not to try again."""
+    shots: list[dict] = []
+    for ex_reason, ex_query, ex_answer in REQUERY_EXAMPLES:
+        shots.append({"role": "user", "content":
+                      f"Query used: {ex_query}\nRejected because: {ex_reason}"})
+        shots.append({"role": "assistant", "content": json.dumps(ex_answer, ensure_ascii=False)})
+
+    conversation = [
+        {"role": "system", "content": REQUERY_SYSTEM},
+        *shots,
+        {"role": "user", "content":
+            f"Sentence: {sentence}\nQuery used: {old_query}\nRejected because: {reason}"},
+    ]
+
+    def attempt(messages: list[dict]) -> tuple[dict, str, str]:
+        parsed = post({
+            "model": model, "temperature": 0.3,
+            "response_format": {"type": "json_object"}, "messages": messages,
+        }, api_key) or {}
+        return (
+            parsed,
+            " ".join(str(parsed.get("query", "")).split())[:100],
+            " ".join(str(parsed.get("fallback", "")).split())[:60],
+        )
+
+    parsed, new, fallback = attempt(conversation)
+    short = bool(new) and len(new.split()) < MIN_SCENE_WORDS
+
+    # Another two-word abstraction is the failure repeating itself; say so and
+    # ask once more rather than searching for it.
+    if short and not parsed.get("skip"):
+        parsed, retried, retried_fallback = attempt(conversation + [
+            {"role": "assistant", "content": json.dumps(parsed, ensure_ascii=False)},
             {"role": "user", "content":
-                f"Sentence: {sentence}\nQuery used: {old_query}\nRejected because: {reason}"},
-        ],
-    }, api_key) or {}
+                f'"{new}" is still a short abstract phrase, which is what failed. '
+                f"Describe what would be visible in the photograph -- who is there and "
+                f"what they are doing -- in at least {MIN_SCENE_WORDS} words."},
+        ])
+        if retried and len(retried.split()) >= MIN_SCENE_WORDS:
+            new, fallback = retried, (retried_fallback or fallback or new)
+        else:
+            fallback = fallback or new
+
     if parsed.get("_error") or parsed.get("skip"):
-        return {"query": "", "skip": True}
-    new = " ".join(str(parsed.get("query", "")).split())[:80]
-    if not new or new.lower() == old_query.lower():
-        return {"query": "", "skip": True}
-    return {"query": new, "skip": False}
+        return {"query": "", "fallback": "", "skip": True}
+
+    # A "new" query that is just the old one trimmed repeats the failure.
+    old_words = {w for w in re.findall(r"[a-z]+", old_query.lower())}
+    new_words = {w for w in re.findall(r"[a-z]+", new.lower())}
+    if not new or new.lower() == old_query.lower() or new_words <= old_words:
+        if fallback and {w for w in re.findall(r"[a-z]+", fallback.lower())} - old_words:
+            return {"query": fallback, "fallback": "", "skip": False, "short": True}
+        return {"query": "", "fallback": "", "skip": True}
+    return {
+        "query": new,
+        "fallback": fallback,
+        "skip": False,
+        "short": len(new.split()) < MIN_SCENE_WORDS,
+    }
 
 
 def ask(sentence: str, query: str, image_path: Path, model: str, api_key: str,
@@ -204,15 +271,26 @@ def main() -> None:
         # is wrong in the same way.
         repair = requery(sentence, term, answer["reason"], args.model, api_key)
         record["new_query"] = repair["query"]
+        record["scene_words"] = len(repair["query"].split())
+        if repair.get("short"):
+            record["still_short"] = True
         if repair["skip"]:
             image["dropped"] = True
             record["outcome"] = "dropped"
             return record
 
+        # A described scene is a long query, and long queries can come back
+        # empty; the fallback keeps recall without returning to the abstraction.
         replacement = fetch_single(
             repair["query"], args.images_dir / image["file"],
             time.monotonic() + PER_CONCEPT_DEADLINE,
         )
+        if not replacement and repair.get("fallback"):
+            record["used_fallback"] = repair["fallback"]
+            replacement = fetch_single(
+                repair["fallback"], args.images_dir / image["file"],
+                time.monotonic() + PER_CONCEPT_DEADLINE,
+            )
         if not replacement:
             image["dropped"] = True
             record["outcome"] = "dropped"
@@ -236,6 +314,8 @@ def main() -> None:
     total = len(log)
     rejected = sum(1 for r in log if r["verdict"] == "reject")
     requeried = sum(1 for r in log if r.get("outcome") == "requeried")
+    still_short = sum(1 for r in log if r.get("still_short"))
+    scene_lengths = [r["scene_words"] for r in log if r.get("scene_words")]
     dropped = sum(1 for r in log if r.get("outcome") == "dropped")
     unchecked = sum(1 for r in log if r["reason"].startswith("not checked"))
 
@@ -254,6 +334,7 @@ def main() -> None:
     args.report.write_text(json.dumps({
         "model": args.model, "requery": args.requery, "checked": total,
         "rejected": rejected, "requeried": requeried, "dropped": dropped,
+        "still_short": still_short,
         "concepts_left_without_a_picture": len(empty), "details": log,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -263,6 +344,11 @@ def main() -> None:
     print(f"rejected by the model       : {rejected:,} ({rejected / max(total, 1):.0%})")
     if args.requery:
         print(f"  searched again, new query : {requeried:,}")
+        if scene_lengths:
+            print(f"    new query length        : {sum(scene_lengths)/len(scene_lengths):.1f} words "
+                  f"on average (was 2-3)")
+        if still_short:
+            print(f"    still too short         : {still_short:,} (model would not elaborate)")
         print(f"  gave up, no picture       : {dropped:,}")
         print(f"concepts left with none     : {len(empty):,}")
     if unchecked:
@@ -278,6 +364,8 @@ def main() -> None:
         print(f"      why      : {record['reason'][:88]}")
         if record.get("outcome") == "requeried":
             print(f"      retried as: {record['new_query']}")
+            if record.get("used_fallback"):
+                print(f"      (long query found nothing, used: {record['used_fallback']})")
         else:
             print(f"      dropped  : {record.get('note', 'nothing photographable')}")
 
