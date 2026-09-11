@@ -24,6 +24,16 @@ on:
       release_tag:
         description: "Release tag to publish the built decks under"
         default: "decks-latest"
+      use_llm:
+        description: "Rewrite the image queries with a language model (needs OPENROUTER_API_KEY)"
+        type: boolean
+        default: false
+      llm_model:
+        description: "OpenRouter model id"
+        default: "google/gemini-2.5-flash"
+      llm_sample_notes:
+        description: "On the sample stage, how many notes the model should tag"
+        default: "600"
       sample_size:
         description: "How many random concepts the sample stage should fetch"
         default: "80"
@@ -83,6 +93,18 @@ jobs:
       - name: Tag notes into searchable concepts
         run: python scripts/tag_notes.py --sample 20
 
+      - name: Refine the tags with a language model
+        if: inputs.use_llm
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ inputs.llm_model }}
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.stage }}" = "sample" ]; then
+            EXTRA="--sample ${{ inputs.llm_sample_notes }}"
+          fi
+          python scripts/llm_tags.py --workers 4 $EXTRA
+
       - name: Report scale
         run: python scripts/estimate.py | tee scale-report.txt
 
@@ -129,11 +151,15 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
+          EXTRA=""
+          if [ "${{ inputs.use_llm }}" = "true" ]; then
+            EXTRA="--only-strategy llm"
+          fi
           python scripts/fetch_images.py \
             --sample "${{ inputs.sample_size }}" \
             --seed "${{ inputs.sample_seed }}" \
             --max-edge "${{ inputs.max_edge }}" \
-            --workers 4 --no-placeholder
+            --workers 4 --no-placeholder $EXTRA
 
       - name: Build the contact sheet
         if: inputs.stage == 'sample'

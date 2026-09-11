@@ -278,9 +278,14 @@ def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict |
     deadline = time.monotonic() + PER_CONCEPT_DEADLINE
     query = target.get("query") or ""
     terms = target.get("terms") or []
+    # When something has already judged that one photo cannot carry the idea,
+    # go straight to the parts. A large stock provider answers every query with
+    # something, so a search that misses the point still "succeeds" -- failure
+    # stopped being a usable signal once Pexels entered the chain.
+    compose = bool(target.get("compose")) and len(terms) > 1
 
     images: list[dict] = []
-    if query:
+    if query and not compose:
         found = fetch_single(query, images_dir / _name_for(target["key"]), deadline)
         if found:
             images.append(found)
@@ -347,7 +352,9 @@ def entry_images(entry: dict) -> list[dict]:
     return []
 
 
-def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
+def build_targets(
+    notes: list[dict], tags: dict[str, dict], only_strategy: str = ""
+) -> list[dict]:
     """Collapse notes onto shared concepts, most-reused concept first.
 
     With a fetch budget, spending it on the concept that covers 40 cards beats
@@ -356,6 +363,8 @@ def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
     grouped: dict[str, dict] = {}
     for record in notes:
         tag = tags.get(record["guid"])
+        if only_strategy and (tag or {}).get("strategy") != only_strategy:
+            continue
         if tag:
             key, query = tag.get("concept_key", ""), tag.get("query", "")
         else:  # no tagging pass available -- fall back to the raw sentence
@@ -365,7 +374,13 @@ def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
             continue
         entry = grouped.setdefault(
             key,
-            {"key": key, "query": query, "notes": 0, "terms": (tag or {}).get("terms", [])},
+            {
+                "key": key,
+                "query": query,
+                "notes": 0,
+                "terms": (tag or {}).get("terms", []),
+                "compose": bool((tag or {}).get("compose")),
+            },
         )
         entry["notes"] += 1
     return sorted(grouped.values(), key=lambda t: -t["notes"])
@@ -385,6 +400,9 @@ def main() -> None:
                          "the frequent concepts are generic verbs and judging quality by them "
                          "is misleading")
     ap.add_argument("--seed", type=int, default=1, help="seed for --sample, so runs are repeatable")
+    ap.add_argument("--only-strategy", default="",
+                    help="restrict to concepts tagged by this strategy (e.g. 'llm'), so a "
+                         "sample compares one tagger at a time instead of a mixture")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--time-budget", type=float, default=0.0,
                     help="stop fetching after this many minutes and keep what was found; "
@@ -410,7 +428,9 @@ def main() -> None:
     else:
         print(f"note: {args.tags} not found, falling back to raw-sentence queries")
 
-    targets = build_targets(notes, tags)
+    targets = build_targets(notes, tags, args.only_strategy)
+    if args.only_strategy:
+        print(f"restricted to concepts tagged by {args.only_strategy!r}")
     covered = sum(t["notes"] for t in targets)
     print(
         f"{len(notes):,} notes -> {len(targets):,} distinct concepts "
