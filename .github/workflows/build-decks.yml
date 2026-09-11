@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "inspect = unpack and report; smoke = try a few image searches; full = build and release"
+        description: "inspect = report; smoke = a few searches; sample = a judgeable contact sheet; full = build and release"
         type: choice
-        options: [inspect, smoke, full]
+        options: [inspect, smoke, sample, full]
         default: inspect
       drive_file_id:
         description: "Drive file id of the source .apkg (shared with anyone-with-the-link)"
@@ -24,6 +24,12 @@ on:
       release_tag:
         description: "Release tag to publish the built decks under"
         default: "decks-latest"
+      sample_size:
+        description: "How many random concepts the sample stage should fetch"
+        default: "80"
+      sample_seed:
+        description: "Seed for the random sample, so a run can be repeated"
+        default: "1"
       upgrade_from:
         description: "Re-search hits from these providers, e.g. 'openverse' after adding a better API key"
         default: ""
@@ -113,6 +119,34 @@ jobs:
           for entry in list(doc.values())[:24]:
               print(f"  {entry['query']:<34} {entry['provider']:<12} {entry['bytes']:>7,} B")
           PY
+
+      # ---- sample: a random slice, rendered so quality can be judged --------
+
+      - name: Fetch a random sample
+        if: inputs.stage == 'sample'
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          python scripts/fetch_images.py \
+            --sample "${{ inputs.sample_size }}" \
+            --seed "${{ inputs.sample_seed }}" \
+            --max-edge "${{ inputs.max_edge }}" \
+            --workers 4 --no-placeholder
+
+      - name: Build the contact sheet
+        if: inputs.stage == 'sample'
+        run: PYTHONPATH=scripts python scripts/contact_sheet.py --max 200
+
+      - name: Upload the contact sheet
+        if: inputs.stage == 'sample'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contact-sheet
+          path: |
+            build/contact-sheet.html
+            data/images.json
 
       - name: Upload the smoke images for eyeballing
         if: inputs.stage == 'smoke'

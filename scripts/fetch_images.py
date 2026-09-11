@@ -229,16 +229,11 @@ def placeholder(text: str) -> bytes:
 PER_CONCEPT_DEADLINE = 90  # seconds; a stalling provider must not stall the run
 
 
-def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict | None:
-    query = target["query"]
-    if not query:
-        return None
-    filename = f"{hashlib.sha1(target['key'].encode()).hexdigest()[:16]}.jpg"
-    deadline = time.monotonic() + PER_CONCEPT_DEADLINE
-
+def fetch_single(query: str, dest: Path, deadline: float) -> dict | None:
+    """Download the first usable image for one query, or return None."""
     for provider_name, provider in PROVIDERS:
         if time.monotonic() > deadline:
-            break
+            return None
         try:
             urls = provider(query)
         except Exception as exc:
@@ -246,7 +241,7 @@ def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict |
             continue
         for url in urls[:4]:
             if time.monotonic() > deadline:
-                break
+                return None
             try:
                 resp = session.get(url, timeout=TIMEOUT)
                 if resp.status_code != 200 or len(resp.content) < MIN_BYTES:
@@ -256,32 +251,100 @@ def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict |
                 continue
             if not jpeg:
                 continue
-            (images_dir / filename).write_bytes(jpeg)
+            dest.write_bytes(jpeg)
             return {
-                "key": target["key"],
-                "notes": target["notes"],
-                "query": query,
+                "file": dest.name,
+                "term": query,
                 "provider": provider_name,
                 "source_url": url,
-                "file": filename,
                 "bytes": len(jpeg),
                 "sha1": hashlib.sha1(jpeg).hexdigest(),
             }
+    return None
 
-    if not allow_placeholder:
-        return None
-    jpeg = placeholder(query)
-    (images_dir / filename).write_bytes(jpeg)
+
+def _name_for(*parts: str) -> str:
+    return hashlib.sha1(":".join(parts).encode()).hexdigest()[:16] + ".jpg"
+
+
+def fetch_one(target: dict, images_dir: Path, allow_placeholder: bool) -> dict | None:
+    """One image for the whole idea, or one per part when that fails.
+
+    "The old man was riding a bicycle" is two vocabulary items. A single photo
+    of an old man on a bicycle says it best, but those are not always to be
+    found -- and showing an old man beside a bicycle still teaches both words,
+    which a picture of only the bicycle does not.
+    """
+    deadline = time.monotonic() + PER_CONCEPT_DEADLINE
+    query = target.get("query") or ""
+    terms = target.get("terms") or []
+
+    images: list[dict] = []
+    if query:
+        found = fetch_single(query, images_dir / _name_for(target["key"]), deadline)
+        if found:
+            images.append(found)
+
+    if not images and len(terms) > 1:
+        for term in terms:
+            if time.monotonic() > deadline:
+                break
+            found = fetch_single(
+                term["query"], images_dir / _name_for(target["key"], term["key"]), deadline
+            )
+            if found:
+                images.append(found)
+
+    # A single part is worth trying on its own only if the combined query and
+    # the parts both came up empty.
+    if not images and len(terms) == 1 and terms[0]["query"] != query:
+        found = fetch_single(
+            terms[0]["query"], images_dir / _name_for(target["key"], terms[0]["key"]), deadline
+        )
+        if found:
+            images.append(found)
+
+    if not images:
+        if not allow_placeholder:
+            return None
+        dest = images_dir / _name_for(target["key"])
+        jpeg = placeholder(query or target["key"])
+        dest.write_bytes(jpeg)
+        images.append({
+            "file": dest.name,
+            "term": query,
+            "provider": "placeholder",
+            "source_url": None,
+            "bytes": len(jpeg),
+            "sha1": hashlib.sha1(jpeg).hexdigest(),
+        })
+
     return {
         "key": target["key"],
         "notes": target["notes"],
         "query": query,
-        "provider": "placeholder",
-        "source_url": None,
-        "file": filename,
-        "bytes": len(jpeg),
-        "sha1": hashlib.sha1(jpeg).hexdigest(),
+        "provider": images[0]["provider"],
+        "composed": len(images) > 1,
+        "images": images,
     }
+
+
+def entry_images(entry: dict) -> list[dict]:
+    """Read both the current manifest shape and the earlier single-file one."""
+    if not entry:
+        return []
+    if entry.get("images"):
+        return entry["images"]
+    if entry.get("file"):
+        return [{
+            "file": entry["file"],
+            "term": entry.get("query", ""),
+            "provider": entry.get("provider", ""),
+            "source_url": entry.get("source_url"),
+            "bytes": entry.get("bytes", 0),
+            "sha1": entry.get("sha1", ""),
+        }]
+    return []
 
 
 def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
@@ -300,7 +363,10 @@ def build_targets(notes: list[dict], tags: dict[str, dict]) -> list[dict]:
             key = query.lower()
         if not key or not query:
             continue
-        entry = grouped.setdefault(key, {"key": key, "query": query, "notes": 0})
+        entry = grouped.setdefault(
+            key,
+            {"key": key, "query": query, "notes": 0, "terms": (tag or {}).get("terms", [])},
+        )
         entry["notes"] += 1
     return sorted(grouped.values(), key=lambda t: -t["notes"])
 
@@ -314,6 +380,11 @@ def main() -> None:
     ap.add_argument("--manifest", type=Path, default=Path("data/images.json"))
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
     ap.add_argument("--limit", type=int, default=0, help="only fetch N missing concepts (0 = all)")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="fetch a random sample of N concepts instead of the most-reused ones; "
+                         "the frequent concepts are generic verbs and judging quality by them "
+                         "is misleading")
+    ap.add_argument("--seed", type=int, default=1, help="seed for --sample, so runs are repeatable")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--time-budget", type=float, default=0.0,
                     help="stop fetching after this many minutes and keep what was found; "
@@ -359,13 +430,18 @@ def main() -> None:
 
     def needs_fetch(target: dict) -> bool:
         entry = manifest.get(target["key"])
-        if not entry:
+        images = entry_images(entry)
+        if not images:
             return True
-        if not (args.images_dir / entry["file"]).exists():
+        if any(not (args.images_dir / i["file"]).exists() for i in images):
             return True
-        return entry.get("provider") in stale_providers
+        return any(i.get("provider") in stale_providers for i in images)
 
     pending = [t for t in targets if needs_fetch(t)]
+    if args.sample:
+        rng = random.Random(args.seed)
+        pending = rng.sample(pending, min(args.sample, len(pending)))
+        print(f"random sample of {len(pending):,} concepts (seed {args.seed})")
     cached = len(targets) - len(pending)
     if args.limit and len(pending) > args.limit:
         print(f"{cached:,} already cached, {len(pending):,} missing, "
@@ -421,8 +497,13 @@ def main() -> None:
     save()
 
     by_provider: dict[str, int] = {}
+    composed = 0
     for entry in manifest.values():
-        by_provider[entry["provider"]] = by_provider.get(entry["provider"], 0) + 1
+        images = entry_images(entry)
+        if len(images) > 1:
+            composed += 1
+        for image in images:
+            by_provider[image["provider"]] = by_provider.get(image["provider"], 0) + 1
     notes_with_image = sum(
         t["notes"] for t in targets if t["key"] in manifest
     )
@@ -431,6 +512,7 @@ def main() -> None:
         f"= {notes_with_image:,}/{len(notes):,} notes ({notes_with_image / max(len(notes), 1):.0%})"
     )
     print(f"  by provider: {by_provider}")
+    print(f"  concepts shown as two images: {composed:,}")
 
 
 if __name__ == "__main__":

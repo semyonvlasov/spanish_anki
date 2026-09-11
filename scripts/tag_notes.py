@@ -44,7 +44,8 @@ MEASURE_NOUNS = {
 }
 
 CONTENT_POS = {"NOUN", "PROPN", "VERB", "ADJ"}
-MAX_KEYWORDS = 3
+MAX_KEYWORDS = 4
+MAX_TERMS = 2  # how many things one card may picture separately
 
 
 def surface(token) -> str:
@@ -59,8 +60,14 @@ def load_nlp():
     return spacy.load("en_core_web_sm")
 
 
-def extract(doc) -> tuple[list[str], list[str], str]:
-    """Return (query words, dedup lemmas, strategy) for one parsed sentence."""
+def extract(doc) -> dict:
+    """Reduce one sentence to a combined query plus its depictable parts.
+
+    A sentence usually names more than one thing worth picturing. "The old man
+    was riding a bicycle" is about an old man *and* a bicycle, so both are kept:
+    the combined query is tried first, and the parts are there to fall back on
+    when no single photo shows the whole scene.
+    """
     person_tokens = {
         token.i
         for ent in doc.ents
@@ -68,8 +75,8 @@ def extract(doc) -> tuple[list[str], list[str], str]:
         for token in ent
     }
 
-    def usable(token) -> bool:
-        if token.i in person_tokens or token.is_stop or token.is_punct:
+    def usable(token, allow_modified_generic: bool = True) -> bool:
+        if token.i in person_tokens or token.is_punct:
             return False
         if token.pos_ not in CONTENT_POS:
             return False
@@ -79,6 +86,10 @@ def extract(doc) -> tuple[list[str], list[str], str]:
         if token.pos_ == "VERB" and lemma in GENERIC_VERBS:
             return False
         if token.pos_ in {"NOUN", "PROPN"} and lemma in GENERIC_NOUNS:
+            # "man" alone pictures nothing, but "old man" is the vocabulary.
+            modified = any(c.pos_ == "ADJ" for c in token.children)
+            return allow_modified_generic and modified
+        if token.pos_ != "ADJ" and token.is_stop:
             return False
         return True
 
@@ -93,49 +104,82 @@ def extract(doc) -> tuple[list[str], list[str], str]:
                         return pobj
         return token
 
-    # Preferred shape: the main verb plus what it acts on ("feed dog").
+    # --- the depictable noun phrases, each keeping its adjective ------------
+    # Only the clause's core arguments are what the sentence is *about*. In
+    # "reading a book in the garden" the garden is scenery; taking it would
+    # dilute the query and waste a second image on it.
+    CORE_DEPS = {"nsubj", "nsubjpass", "dobj", "obj", "attr", "ROOT"}
+
+    def as_term(chunk) -> dict | None:
+        head = unwrap_measure(chunk.root)
+        if not usable(head):
+            return None
+        adjs = [t for t in chunk if t.pos_ == "ADJ" and usable(t)]
+        words = [a.lemma_.lower() for a in adjs[:1]] + [head.lemma_.lower()]
+        return {"query": " ".join(words), "key": "-".join(sorted(words))}
+
+    core, peripheral = [], []
+    for chunk in doc.noun_chunks:
+        term = as_term(chunk)
+        if term is None:
+            continue
+        (core if chunk.root.dep_ in CORE_DEPS else peripheral).append(term)
+
+    terms: list[dict] = []
+    seen_keys: set[str] = set()
+    for term in core + (peripheral if not core else []):
+        if term["key"] in seen_keys:
+            continue
+        seen_keys.add(term["key"])
+        terms.append(term)
+        if len(terms) == MAX_TERMS:
+            break
+
+    # --- the combined query: the action plus what it involves ---------------
     root = next((t for t in doc if t.dep_ == "ROOT"), None)
-    obj = None
-    if root is not None:
-        for child in root.children:
-            if child.dep_ in {"dobj", "pobj", "attr", "obj"} and usable(child):
-                obj = unwrap_measure(child)
-                break
+    verb = root if root is not None and root.pos_ == "VERB" and usable(root) else None
+    if verb is None:
+        verb = next((t for t in doc if t.pos_ == "VERB" and usable(t)), None)
 
-    picked: list = []
-    strategy = "content-words"
-    if obj is not None:
-        modifiers = [c for c in obj.children if c.pos_ == "ADJ" and usable(c)]
-        if root is not None and usable(root):
-            picked = [root, *modifiers[:1], obj]
-            strategy = "verb+object"
-        else:
-            picked = [*modifiers[:1], obj]
-            strategy = "object"
-
-    if not picked:
-        nouns = [t for t in doc if usable(t) and t.pos_ in {"NOUN", "PROPN"}]
-        verbs = [t for t in doc if usable(t) and t.pos_ == "VERB"]
-        adjs = [t for t in doc if usable(t) and t.pos_ == "ADJ"]
-        picked = (nouns + verbs + adjs)[:MAX_KEYWORDS]
-        strategy = "content-words" if picked else "none"
-
-    # A lone adjective ("true", "ready") never makes a usable image query.
-    if len(picked) == 1 and picked[0].pos_ == "ADJ":
-        return [], [], "none"
-
-    seen: set[str] = set()
     query_words: list[str] = []
     key_words: list[str] = []
-    for token in picked:
-        lemma = token.lemma_.lower()
-        if lemma in seen:
-            continue
-        seen.add(lemma)
-        query_words.append(surface(token))
-        key_words.append(lemma)
+    if verb is not None:
+        query_words.append(surface(verb))
+        key_words.append(verb.lemma_.lower())
+    for term in terms:
+        query_words.extend(term["query"].split())
+        key_words.extend(term["key"].split("-"))
 
-    return query_words[:MAX_KEYWORDS], key_words[:MAX_KEYWORDS], strategy
+    if not terms and verb is None:
+        return {"keywords": [], "query": "", "concept_key": "", "strategy": "none", "terms": []}
+
+    # A lone adjective, or nothing but a light frame, pictures nothing.
+    if not terms and verb is None:
+        return {"keywords": [], "query": "", "concept_key": "", "strategy": "none", "terms": []}
+
+    strategy = (
+        "verb+terms" if verb is not None and terms
+        else "terms" if terms
+        else "verb"
+    )
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    ordered_query, ordered_key = [], []
+    for q, k in zip(query_words, key_words):
+        if k in seen:
+            continue
+        seen.add(k)
+        ordered_query.append(q)
+        ordered_key.append(k)
+
+    return {
+        "keywords": ordered_query[:MAX_KEYWORDS],
+        "query": " ".join(ordered_query[:MAX_KEYWORDS]),
+        "concept_key": "-".join(sorted(ordered_key[:MAX_KEYWORDS])),
+        "strategy": strategy,
+        "terms": terms,
+    }
 
 
 def main() -> None:
@@ -154,18 +198,15 @@ def main() -> None:
     strategies: Counter[str] = Counter()
     concepts: Counter[str] = Counter()
 
+    multi_term = 0
     for note, doc in zip(notes, nlp.pipe(texts, batch_size=args.batch_size)):
-        query_words, key_words, strategy = extract(doc)
-        concept_key = "-".join(sorted(key_words)) if key_words else ""
-        strategies[strategy] += 1
-        if concept_key:
-            concepts[concept_key] += 1
-        tagged[note["guid"]] = {
-            "keywords": query_words,
-            "query": " ".join(query_words),
-            "concept_key": concept_key,
-            "strategy": strategy,
-        }
+        tag = extract(doc)
+        strategies[tag["strategy"]] += 1
+        if tag["concept_key"]:
+            concepts[tag["concept_key"]] += 1
+        if len(tag["terms"]) > 1:
+            multi_term += 1
+        tagged[note["guid"]] = tag
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
@@ -181,10 +222,13 @@ def main() -> None:
         print(f"  reuse factor    : {taggable / max(len(concepts), 1):.1f} notes per image")
     print(f"  most common     : {concepts.most_common(10)}")
 
+    print(f"  with 2 depictable parts: {multi_term:,}")
+
     if args.sample:
         print("\nexamples:")
         for note, tag in list(zip(notes, tagged.values()))[: args.sample]:
-            print(f"  {note['english'][:64]:<64} -> {tag['query']!r} [{tag['strategy']}]")
+            parts = " + ".join(t["query"] for t in tag["terms"]) or "-"
+            print(f"  {note['english'][:56]:<56} -> {tag['query']!r:<34} parts: {parts}")
 
 
 if __name__ == "__main__":

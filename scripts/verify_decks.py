@@ -35,13 +35,18 @@ def verify(path: Path, expect_variant: str) -> list[str]:
 
     dangling_img = dangling_sound = dangling_audio = 0
     with_image = with_audio = with_player = 0
+    paired = 0
     empty_both_sides = 0
 
     for note in collection.notes:
         values = note.as_dict(notetype)
 
-        for name in IMG_SRC_RE.findall(values["Image"]):
+        names = IMG_SRC_RE.findall(values["Image"])
+        if names:
             with_image += 1
+        if len(names) > 1:
+            paired += 1
+        for name in names:
             if name not in media:
                 dangling_img += 1
         for name in SOUND_RE.findall(values["Audio"]):
@@ -84,7 +89,7 @@ def verify(path: Path, expect_variant: str) -> list[str]:
     print(f"{path.name}")
     print(f"  notes                 : {len(collection.notes):,}")
     print(f"  media files in package: {len(media):,}")
-    print(f"  notes with an image   : {with_image:,}")
+    print(f"  notes with an image   : {with_image:,} ({paired:,} showing a pair)")
     print(f"  notes with audio      : {with_audio:,}")
     print(f"  hinted audio players  : {with_player:,}")
     print(f"  unreferenced media    : {orphan_media:,}")

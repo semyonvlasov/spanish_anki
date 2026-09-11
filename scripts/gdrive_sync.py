@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+from fetch_images import entry_images
+
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
@@ -106,46 +108,53 @@ def main() -> None:
     print(f"{len(remote)} files already in the folder")
 
     uploaded = 0
-    for guid, entry in images.items():
-        local = args.images_dir / entry["file"]
-        file_id = remote.get(entry["file"])
+    total_images = 0
+    for entry in images.values():
+        for image in entry_images(entry):
+            total_images += 1
+            name = image["file"]
+            local = args.images_dir / name
+            file_id = remote.get(name)
 
-        if file_id is None:
-            if not local.exists():
-                continue
-            file_id = (
-                service.files()
-                .create(
-                    body={"name": entry["file"], "parents": [folder_id]},
-                    media_body=MediaFileUpload(str(local), mimetype="image/jpeg", resumable=False),
-                    fields="id",
-                    supportsAllDrives=True,
-                )
-                .execute()["id"]
-            )
-            remote[entry["file"]] = file_id
-            uploaded += 1
-            if args.share:
-                try:
-                    service.permissions().create(
-                        fileId=file_id,
-                        body={"role": "reader", "type": "anyone"},
+            if file_id is None:
+                if not local.exists():
+                    continue
+                file_id = (
+                    service.files()
+                    .create(
+                        body={"name": name, "parents": [folder_id]},
+                        media_body=MediaFileUpload(
+                            str(local), mimetype="image/jpeg", resumable=False
+                        ),
+                        fields="id",
                         supportsAllDrives=True,
-                    ).execute()
-                except Exception as exc:
-                    print(f"  could not share {entry['file']}: {exc}", file=sys.stderr)
-            if uploaded % 50 == 0:
-                print(f"  uploaded {uploaded}")
+                    )
+                    .execute()["id"]
+                )
+                remote[name] = file_id
+                uploaded += 1
+                if args.share:
+                    try:
+                        service.permissions().create(
+                            fileId=file_id,
+                            body={"role": "reader", "type": "anyone"},
+                            supportsAllDrives=True,
+                        ).execute()
+                    except Exception as exc:
+                        print(f"  could not share {name}: {exc}", file=sys.stderr)
+                if uploaded % 50 == 0:
+                    print(f"  uploaded {uploaded}")
 
-        entry["drive_id"] = file_id
-        entry["download_url"] = download_url(file_id)
+            image["drive_id"] = file_id
+            image["download_url"] = download_url(file_id)
 
     manifest_doc["images"] = images
     manifest_doc["drive_folder_id"] = folder_id
     args.manifest.write_text(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"uploaded {uploaded} new files; manifest now carries Drive links for {len(images)} images")
+    print(f"uploaded {uploaded} new files; manifest now carries Drive links for "
+          f"{total_images} images across {len(images)} concepts")
 
 
 if __name__ == "__main__":

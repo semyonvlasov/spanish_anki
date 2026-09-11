@@ -26,12 +26,23 @@ SAMPLE = {
 }
 
 
-def sample_image() -> str:
+def sample_image(kind: str = "bicycle") -> str:
     """A stand-in photo, drawn locally so the preview needs no network."""
     from PIL import Image, ImageDraw
 
     image = Image.new("RGB", (600, 360), (208, 220, 228))
     draw = ImageDraw.Draw(image)
+    if kind == "person":
+        draw.ellipse((265, 90, 335, 160), outline=(70, 80, 90), width=9)
+        draw.line([(300, 160), (300, 265)], fill=(70, 80, 90), width=9)
+        draw.line([(300, 185), (245, 230)], fill=(70, 80, 90), width=9)
+        draw.line([(300, 185), (355, 230)], fill=(70, 80, 90), width=9)
+        draw.line([(300, 265), (262, 320)], fill=(70, 80, 90), width=9)
+        draw.line([(300, 265), (338, 320)], fill=(70, 80, 90), width=9)
+        draw.text((228, 330), "sample: \"old man\"", fill=(90, 100, 110))
+        buf = io.BytesIO()
+        image.save(buf, "JPEG", quality=80)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
     for i in range(0, 600, 24):
         draw.line([(i, 360), (i + 120, 0)], fill=(196, 210, 220), width=8)
     draw.ellipse((150, 190, 250, 290), outline=(70, 80, 90), width=9)
@@ -64,7 +75,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("build/card-preview.html"))
     args = ap.parse_args()
 
-    img = f'<img src="{sample_image()}">'
+    single = f'<div class="img"><img src="{sample_image()}"></div>'
+    pair = (
+        f'<div class="img pair"><img src="{sample_image(kind="person")}">'
+        f'<img src="{sample_image()}"></div>'
+    )
+    img = single
     # Anki turns [sound:x] into its own play button; show a stand-in here.
     play = '<span style="font-size:15px;opacity:.6">[Anki play button]</span>'
     player = '<audio controls preload="none"></audio>'
@@ -72,11 +88,16 @@ def main() -> None:
     forward = {**SAMPLE, "Audio": play, "AudioPlayer": "", "Image": img}
     reverse = {**SAMPLE, "Audio": play, "AudioPlayer": player, "Image": img}
 
+    reverse_pair = {**reverse, "Image": pair}
+    forward_pair = {**forward, "Image": pair}
+
     faces = [
         ("ES&rarr;EN &mdash; question", "the image is hidden until asked for", render(FORWARD_QFMT, forward)),
         ("ES&rarr;EN &mdash; answer", "translation and image revealed", render(FORWARD_AFMT, forward)),
         ("EN&rarr;ES &mdash; question", "image up front, Spanish audio hidden", render(REVERSE_QFMT, reverse)),
         ("EN&rarr;ES &mdash; answer", "Spanish revealed, audio replays", render(REVERSE_AFMT, reverse)),
+        ("EN&rarr;ES &mdash; a pair", "no single photo fits, so both words are shown", render(REVERSE_QFMT, reverse_pair)),
+        ("ES&rarr;EN &mdash; a pair, revealed", "the same pair behind the hint", render(FORWARD_AFMT, forward_pair)),
     ]
 
     blocks = "\n".join(

@@ -22,6 +22,8 @@ from pathlib import Path
 import genanki
 import requests
 
+from fetch_images import entry_images
+
 # Stable ids -- changing these makes Anki treat a rebuild as a brand new deck
 # and lose the learner's scheduling, so they are pinned deliberately.
 MODEL_ID_FORWARD = 1_612_004_101
@@ -45,8 +47,11 @@ CSS = """
 .phrase.en { color: #2f6f4f; }
 .nightMode .phrase.en, .night_mode .phrase.en { color: #7fd1a6; }
 
-.img img, .img > img { max-width: 100%; max-height: 340px; border-radius: 12px; }
-.img { margin: 14px 0; }
+.img { margin: 14px 0; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.img img { max-width: 100%; max-height: 340px; border-radius: 12px; }
+/* Two vocabulary items, two pictures -- side by side, or stacked when narrow. */
+.img.pair img { max-width: 47%; max-height: 230px; object-fit: cover; }
+@media (max-width: 420px) { .img.pair img { max-width: 100%; max-height: 190px; } }
 
 .audio { margin: 10px 0; }
 .audio audio { width: min(320px, 90%); }
@@ -82,7 +87,7 @@ FORWARD_QFMT = """
 <div class="audio">{{Audio}}</div>
 {{#Image}}
 <details class="hint"><summary>&#128444;&#65039;&nbsp; Показать картинку</summary>
-  <div class="img">{{Image}}</div>
+  {{Image}}
 </details>
 {{/Image}}
 """
@@ -92,12 +97,12 @@ FORWARD_AFMT = """
 <div class="audio">{{Audio}}</div>
 <hr id=answer>
 <div class="phrase en">{{English}}</div>
-{{#Image}}<div class="img">{{Image}}</div>{{/Image}}
+{{#Image}}{{Image}}{{/Image}}
 """
 
 REVERSE_QFMT = """
 <div class="phrase en">{{English}}</div>
-{{#Image}}<div class="img">{{Image}}</div>{{/Image}}
+{{#Image}}{{Image}}{{/Image}}
 {{#AudioPlayer}}
 <details class="hint"><summary>&#128266;&nbsp; Прослушать по-испански</summary>
   <div class="audio">{{AudioPlayer}}</div>
@@ -107,7 +112,7 @@ REVERSE_QFMT = """
 
 REVERSE_AFMT = """
 <div class="phrase en">{{English}}</div>
-{{#Image}}<div class="img">{{Image}}</div>{{/Image}}
+{{#Image}}{{Image}}{{/Image}}
 <hr id=answer>
 <div class="phrase es">{{Spanish}}</div>
 <div class="audio">{{Audio}}</div>
@@ -142,21 +147,21 @@ class StableNote(genanki.Note):
         pass
 
 
-def ensure_image(entry: dict, images_dir: Path) -> Path | None:
+def ensure_image(image: dict, images_dir: Path) -> Path | None:
     """Return the local image path, pulling it from Drive if only a link is stored."""
-    if not entry:
+    if not image:
         return None
-    local = images_dir / entry["file"]
+    local = images_dir / image["file"]
     if local.exists():
         return local
-    url = entry.get("download_url") or entry.get("drive_download_url")
+    url = image.get("download_url") or image.get("drive_download_url")
     if not url:
         return None
     try:
         resp = requests.get(url, timeout=60)
         resp.raise_for_status()
     except requests.RequestException as exc:
-        print(f"  could not fetch {entry['file']} from Drive: {exc}")
+        print(f"  could not fetch {image['file']} from Drive: {exc}")
         return None
     images_dir.mkdir(parents=True, exist_ok=True)
     local.write_bytes(resp.content)
@@ -186,6 +191,7 @@ def build(
     staging.mkdir(parents=True, exist_ok=True)
     media_files: set[str] = set()
     used_images = 0
+    used_pairs = 0
     used_audio = 0
 
     for record in notes:
@@ -205,17 +211,25 @@ def build(
             used_audio += 1
 
         image_html = ""
-        # Notes that reduced to the same concept share one image.
+        # Notes that reduced to the same concept share the same image or pair.
         concept_key = (tags.get(record["guid"]) or {}).get("concept_key", "")
         entry = images.get(concept_key) if concept_key else None
-        local = ensure_image(entry, images_dir)
-        if local and local.exists():
+        parts = []
+        for image in entry_images(entry):
+            local = ensure_image(image, images_dir)
+            if not (local and local.exists()):
+                continue
             dest = staging / local.name
             if not dest.exists():
                 shutil.copyfile(local, dest)
             media_files.add(str(dest))
-            image_html = f'<img src="{local.name}">'
+            parts.append(f'<img src="{local.name}">')
+        if parts:
+            klass = "img pair" if len(parts) > 1 else "img"
+            image_html = f'<div class="{klass}">{"".join(parts)}</div>'
             used_images += 1
+            if len(parts) > 1:
+                used_pairs += 1
 
         note = StableNote(
             model=model,
@@ -239,8 +253,9 @@ def build(
 
     size_mb = out_path.stat().st_size / 1e6
     print(
-        f"{out_path.name}: {len(deck.notes)} notes, {used_images} with image, "
-        f"{used_audio} with audio, {len(media_files)} media files, {size_mb:.1f} MB"
+        f"{out_path.name}: {len(deck.notes):,} notes, {used_images:,} with image "
+        f"({used_pairs:,} showing a pair), {used_audio:,} with audio, "
+        f"{len(media_files):,} media files, {size_mb:,.1f} MB"
     )
 
 
@@ -266,9 +281,10 @@ def main() -> None:
     reachable = sum(
         1 for n in notes if (tags.get(n["guid"]) or {}).get("concept_key") in images
     )
+    pairs = sum(1 for e in images.values() if len(entry_images(e)) > 1)
     print(
         f"{len(notes):,} notes, {len(images):,} images in manifest, "
-        f"{reachable:,} notes resolve to an image"
+        f"{reachable:,} notes resolve to an image, {pairs:,} concepts are a pair"
     )
 
     for variant, deck_name, filename in (
