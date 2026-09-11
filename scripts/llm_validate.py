@@ -171,6 +171,13 @@ def main() -> None:
     final_rejects = sum(1 for r in log if r.get("final") == "reject")
     rescued = first_pass_rejects - final_rejects
     total = len(log)
+    # Distinguish "the retries were also bad" from "there were no retries".
+    retried = sum(1 for r in log if len(r["attempts"]) > 1)
+    exhausted = sum(1 for r in log if r.get("exhausted"))
+    total_looks = sum(len(r["attempts"]) for r in log)
+    unchecked = sum(
+        1 for r in log for a in r["attempts"] if a["reason"].startswith("not checked")
+    )
 
     args.manifest.write_text(
         json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -179,7 +186,8 @@ def main() -> None:
     args.report.write_text(json.dumps({
         "model": args.model, "refetch": args.refetch, "checked": total,
         "rejected_first_pass": first_pass_rejects, "rejected_final": final_rejects,
-        "replaced_successfully": rescued, "details": log,
+        "replaced_successfully": rescued, "retried": retried, "exhausted": exhausted,
+        "total_judgements": total_looks, "details": log,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print()
@@ -188,9 +196,19 @@ def main() -> None:
     print(f"rejected on the first look  : {first_pass_rejects:,} "
           f"({first_pass_rejects / max(total, 1):.0%})")
     if args.refetch:
+        print(f"  a replacement was fetched : {retried:,} of those")
+        print(f"  providers had none left   : {exhausted:,}")
         print(f"  replaced with a better one: {rescued:,}")
         print(f"  still rejected after retry: {final_rejects:,}")
+    print(f"total judgements made       : {total_looks:,}"
+          + (f" ({unchecked:,} could not reach the model)" if unchecked else ""))
     print("=" * 58)
+    print()
+    print("what it rejected, and why:")
+    for record in log:
+        for attempt in record["attempts"]:
+            if attempt["verdict"] == "reject":
+                print(f"  {record['term'][:34]:<34} [{attempt['provider']}] {attempt['reason'][:90]}")
 
 
 if __name__ == "__main__":
