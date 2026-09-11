@@ -211,15 +211,20 @@ jobs:
 
       # ---- everything below only runs for a full build -------------------
 
-      - name: Restore image cache from the previous release
+      - name: Restore the image cache
         if: inputs.stage == 'full'
         run: |
-          mkdir -p build/images
+          mkdir -p build/images data
           if gh release download "${{ inputs.release_tag }}" --pattern images.zip --dir /tmp 2>/dev/null; then
             unzip -q -o /tmp/images.zip -d build/images
-            echo "restored $(find build/images -name '*.jpg' | wc -l) cached images"
+            echo "restored $(find build/images -name '*.jpg' | wc -l) images from the last release"
+          elif gh run download --name image-cache --dir /tmp/partial 2>/dev/null; then
+            # What a run that failed or was cancelled managed to fetch.
+            unzip -q -o /tmp/partial/image-cache.zip -d build/images 2>/dev/null || true
+            cp -f /tmp/partial/images.json data/images.json 2>/dev/null || true
+            echo "resumed $(find build/images -name '*.jpg' | wc -l) images from a partial run"
           else
-            echo "no previous image cache"
+            echo "no image cache to restore"
           fi
 
       - name: Fetch images
@@ -243,6 +248,72 @@ jobs:
             --time-budget "${{ inputs.time_budget }}" \
             --workers 4 \
             $EXTRA
+
+      # Everything above this point is expensive and easy to lose: the fetch
+      # persists nothing off the runner, so a failure later in the job used to
+      # throw away the whole download. always() keeps it.
+      - name: Preserve the image cache, even on failure
+        if: always() && inputs.stage == 'full'
+        run: |
+          mkdir -p build/images
+          ( cd build/images && zip -q -r "$GITHUB_WORKSPACE/image-cache.zip" . ) || true
+          ls -la image-cache.zip 2>/dev/null || echo "nothing fetched yet"
+
+      - name: Upload the image cache
+        if: always() && inputs.stage == 'full'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-cache
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            image-cache.zip
+            data/images.json
+            data/tags.json
+            data/notes.json
+
+      # The whole point of the judging pass is the deck, not the sample.
+      - name: Have a model judge the pictures
+        if: inputs.stage == 'full' && inputs.validate_images
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ inputs.llm_model }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: PYTHONPATH=scripts python scripts/llm_validate.py --requery --workers 6
+
+      # Judging replaces pictures and rewrites the manifest, so save again.
+      - name: Preserve the cache after judging
+        if: always() && inputs.stage == 'full' && inputs.validate_images
+        run: |
+          mkdir -p build/images
+          rm -f image-cache.zip
+          ( cd build/images && zip -q -r "$GITHUB_WORKSPACE/image-cache.zip" . ) || true
+
+      - name: Upload the cache after judging
+        if: always() && inputs.stage == 'full' && inputs.validate_images
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-cache
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            image-cache.zip
+            data/images.json
+            data/tags.json
+            data/notes.json
+            build/validation-report.json
+
+      - name: Contact sheet for the finished build
+        if: inputs.stage == 'full'
+        continue-on-error: true
+        run: |
+          PYTHONPATH=scripts python scripts/contact_sheet.py --max 300 \
+            --out build/contact-sheet.html \
+            --title "Spanish deck -- what each card looks up"
 
       - name: Mirror images to Google Drive
         if: inputs.stage == 'full' && env.GDRIVE_SERVICE_ACCOUNT_JSON != ''
@@ -276,11 +347,9 @@ jobs:
         if: inputs.stage == 'full'
         run: PYTHONPATH=scripts python scripts/verify_decks.py
 
-      - name: Pack the image cache
+      - name: Pack the image cache for the release
         if: inputs.stage == 'full'
-        run: |
-          mkdir -p build/images
-          cd build/images && zip -q -r /tmp/images.zip . && ls -la /tmp/images.zip
+        run: cp image-cache.zip /tmp/images.zip && ls -la /tmp/images.zip
 
       - name: Commit the image manifest
         if: inputs.stage == 'full'
@@ -316,4 +385,5 @@ jobs:
             dist/spanish_es-en_hinted-image.apkg \
             dist/spanish_en-es_hinted-audio.apkg \
             data/tags.json \
+            build/contact-sheet.html \
             /tmp/images.zip
