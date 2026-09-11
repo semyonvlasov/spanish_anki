@@ -29,6 +29,7 @@ def main() -> None:
     ap.add_argument("--manifest", type=Path, default=Path("data/images.json"))
     ap.add_argument("--images-dir", type=Path, default=Path("build/images"))
     ap.add_argument("--out", type=Path, default=Path("build/contact-sheet.html"))
+    ap.add_argument("--title", default="Image search contact sheet")
     ap.add_argument("--max", type=int, default=120)
     args = ap.parse_args()
 
@@ -52,10 +53,16 @@ def main() -> None:
             path = args.images_dir / image["file"]
             if not path.exists():
                 continue
+            verdict = image.get("verdict")
+            badge = ""
+            if verdict:
+                label = "kept" if verdict == "ok" else "rejected"
+                badge = (f'<span class="v {verdict}">{label}</span>'
+                         f'<span class="why">{html.escape(image.get("reason") or "")}</span>')
             cells.append(
-                f'<figure><img src="{data_uri(path)}" loading="lazy">'
+                f'<figure class="{verdict or ""}"><img src="{data_uri(path)}" loading="lazy">'
                 f'<figcaption>{html.escape(image.get("term") or "")} '
-                f'<span>{html.escape(image.get("provider") or "")}</span></figcaption></figure>'
+                f'<span>{html.escape(image.get("provider") or "")}</span>{badge}</figcaption></figure>'
             )
         if not cells:
             continue
@@ -74,10 +81,16 @@ def main() -> None:
         for image in entry_images(entry):
             providers[image["provider"]] = providers.get(image["provider"], 0) + 1
     paired = sum(1 for e in images.values() if len(entry_images(e)) > 1)
+    verdicts: dict[str, int] = {}
+    for entry in images.values():
+        for image in entry_images(entry):
+            if image.get("verdict"):
+                verdicts[image["verdict"]] = verdicts.get(image["verdict"], 0) + 1
+    verdict_line = (f' &middot; verdicts: {verdicts}' if verdicts else "")
 
     page = f"""<!doctype html>
 <meta charset="utf-8">
-<title>Image search contact sheet</title>
+<title>{html.escape(args.title)}</title>
 <style>
 body {{ margin:0; padding:26px; background:#eceae5; font:15px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif; color:#241f1a; }}
 h1 {{ font-size:20px; margin:0 0 4px; }}
@@ -93,11 +106,16 @@ figure {{ margin:0; text-align:center; }}
 figure img {{ height:150px; width:auto; max-width:230px; object-fit:cover; border-radius:9px; display:block; }}
 figcaption {{ font-size:11.5px; color:#7b7367; margin-top:4px; }}
 figcaption span {{ opacity:.65; }}
+.v {{ display:block; margin-top:3px; font-weight:600; opacity:1; }}
+.v.ok {{ color:#2f7d4f; }}
+.v.reject {{ color:#b03030; }}
+.why {{ display:block; max-width:230px; font-size:11px; opacity:.8; }}
+figure.reject img {{ outline:3px solid #d46a6a; }}
 @media (max-width:760px) {{ article {{ grid-template-columns:1fr; }} }}
 </style>
-<h1>Image search contact sheet</h1>
+<h1>{html.escape(args.title)}</h1>
 <p class="summary">{len(rows)} concepts shown &middot; {paired:,} of {len(images):,} concepts
-came back as a pair &middot; providers: {html.escape(str(providers))}</p>
+came back as a pair &middot; providers: {html.escape(str(providers))}{verdict_line}</p>
 {"".join(rows)}
 """
     args.out.parent.mkdir(parents=True, exist_ok=True)

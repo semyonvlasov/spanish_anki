@@ -229,8 +229,15 @@ def placeholder(text: str) -> bytes:
 PER_CONCEPT_DEADLINE = 90  # seconds; a stalling provider must not stall the run
 
 
-def fetch_single(query: str, dest: Path, deadline: float) -> dict | None:
-    """Download the first usable image for one query, or return None."""
+def fetch_single(
+    query: str, dest: Path, deadline: float, exclude: set[str] | None = None
+) -> dict | None:
+    """Download the first usable image for one query, or return None.
+
+    ``exclude`` skips source URLs that have already been tried, so a rejected
+    picture can be replaced by the next candidate rather than re-downloaded.
+    """
+    exclude = exclude or set()
     for provider_name, provider in PROVIDERS:
         if time.monotonic() > deadline:
             return None
@@ -239,7 +246,9 @@ def fetch_single(query: str, dest: Path, deadline: float) -> dict | None:
         except Exception as exc:
             print(f"    [{provider_name}] {query!r}: {exc}", file=sys.stderr)
             continue
-        for url in urls[:4]:
+        for url in urls[:6]:
+            if url in exclude:
+                continue
             if time.monotonic() > deadline:
                 return None
             try:

@@ -34,6 +34,10 @@ on:
       llm_sample_notes:
         description: "On the sample stage, how many notes the model should tag"
         default: "600"
+      validate_images:
+        description: "On the sample stage, also have a vision model judge each picture"
+        type: boolean
+        default: false
       sample_size:
         description: "How many random concepts the sample stage should fetch"
         default: "80"
@@ -161,17 +165,39 @@ jobs:
             --max-edge "${{ inputs.max_edge }}" \
             --workers 4 --no-placeholder $EXTRA
 
-      - name: Build the contact sheet
+      - name: Contact sheet, before any validation
         if: inputs.stage == 'sample'
-        run: PYTHONPATH=scripts python scripts/contact_sheet.py --max 200
+        run: |
+          PYTHONPATH=scripts python scripts/contact_sheet.py --max 200 \
+            --out build/sheet-query-only.html \
+            --title "A -- model rewrote the query only"
 
-      - name: Upload the contact sheet
+      - name: Have a model look at the pictures
+        if: inputs.stage == 'sample' && inputs.validate_images
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ inputs.llm_model }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: PYTHONPATH=scripts python scripts/llm_validate.py --refetch --workers 4
+
+      - name: Contact sheet, after validation
+        if: inputs.stage == 'sample' && inputs.validate_images
+        run: |
+          PYTHONPATH=scripts python scripts/contact_sheet.py --max 200 \
+            --out build/sheet-validated.html \
+            --title "B -- model also judged each picture"
+
+      - name: Upload both contact sheets
         if: inputs.stage == 'sample'
         uses: actions/upload-artifact@v4
         with:
           name: contact-sheet
           path: |
-            build/contact-sheet.html
+            build/sheet-query-only.html
+            build/sheet-validated.html
+            build/validation-report.json
             data/images.json
 
       - name: Upload the smoke images for eyeballing
