@@ -52,19 +52,26 @@ Rules:
   split an idea a single photo captures.
 - skip abstractions: opinions, doubt, politeness, grammar drills. Better no
   picture than a misleading one.
+- NEVER put a negation in the query. A photograph cannot show that something
+  did not happen or does not work -- "brakes that are not working" look exactly
+  like brakes. Search the thing itself: "car brakes not working" -> "car
+  brakes", "he did not eat" -> "plate of food". The sentence supplies the
+  negation; the picture supplies the thing.
 
 Reply with JSON only: {"results": [ ... ]}. No prose, no code fences."""
 
 EXAMPLE_IN = """1. The old man was riding a bicycle.
 2. I don't know what you mean.
 3. She is reading a book in the garden.
-4. Tom feeds his dog every morning."""
+4. Tom feeds his dog every morning.
+5. The car's brakes were not working."""
 
 EXAMPLE_OUT = json.dumps({"results": [
     {"i": 1, "query": "elderly man cycling", "parts": ["elderly man", "bicycle"], "skip": False},
     {"i": 2, "query": "", "parts": [], "skip": True},
     {"i": 3, "query": "woman reading book", "parts": ["reading a book"], "skip": False},
     {"i": 4, "query": "feeding a dog", "parts": ["feeding a dog"], "skip": False},
+    {"i": 5, "query": "car brakes", "parts": ["car brakes"], "skip": False},
 ]}, ensure_ascii=False)
 
 

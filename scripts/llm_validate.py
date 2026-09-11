@@ -45,6 +45,12 @@ Judge the picture ONLY against what it is meant to show. When the card carries
 two pictures, each one carries half the idea: do not reject a picture for
 missing what the other one is there to supply.
 
+A picture cannot show a negation or an absence. If what it is meant to show
+contains "not", "no", "without" or "never", judge it against the thing alone:
+for "brakes that are not working", a photograph of car brakes is correct, and
+so is a mechanic at work on them. The sentence carries the negation; the
+picture only has to carry the thing.
+
 Reply with JSON only: {"verdict": "...", "reason": "..."}"""
 
 REQUERY_SYSTEM = """You repair a failed image search for a language-learning flashcard.
@@ -71,6 +77,10 @@ where any picture misleads.
 When the thing exists but the library lacks it (a rotten pear), go to the
 nearest thing that is still true ("rotten fruit"), never a different thing.
 
+Never move to a cause or a consequence. Failed brakes are not a car crash, a
+missed train is not an empty platform at night. Stay on the object the sentence
+names, and drop any negation: "car brakes not working" -> "car brakes".
+
 Reply with JSON only: {"query": "...", "fallback": "...", "skip": false}"""
 
 REQUERY_EXAMPLES = [
@@ -83,6 +93,9 @@ REQUERY_EXAMPLES = [
     ("The image is text-heavy.",
      "person fired",
      {"query": "empty office desk", "fallback": "cardboard box", "skip": False}),
+    ("The image shows a mechanic working on brakes, not brakes that are not working.",
+     "car brakes not working",
+     {"query": "car brakes", "fallback": "brake disc", "skip": False}),
 ]
 
 
@@ -157,12 +170,15 @@ def requery(sentence: str, old_query: str, reason: str, model: str, api_key: str
     if parsed.get("_error") or parsed.get("skip"):
         return {"query": "", "fallback": "", "skip": True}
 
-    # A "new" query that is just the old one trimmed repeats the failure.
+    # Reject a repair that only reshuffles the words that just failed -- but a
+    # strict subset is the repair we most want: dropping a negation always
+    # produces one ("car brakes not working" -> "car brakes"), and so does
+    # dropping any other word that made the search fail.
     old_words = {w for w in re.findall(r"[a-z]+", old_query.lower())}
     new_words = {w for w in re.findall(r"[a-z]+", new.lower())}
-    if not new or new.lower() == old_query.lower() or new_words <= old_words:
-        if fallback and {w for w in re.findall(r"[a-z]+", fallback.lower())} - old_words:
-            return {"query": fallback, "fallback": "", "skip": False, "short": True}
+    if not new or new.lower() == old_query.lower() or new_words == old_words:
+        if fallback and {w for w in re.findall(r"[a-z]+", fallback.lower())} != old_words:
+            return {"query": fallback, "fallback": "", "skip": False}
         return {"query": "", "fallback": "", "skip": True}
     return {
         "query": new,
