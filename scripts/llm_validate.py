@@ -36,10 +36,14 @@ You are given what the picture is meant to show, and the picture. Answer:
            connect the two, "reject" otherwise
   reason   one short clause saying why
 
-Reject a picture that is merely topically adjacent -- a keyboard for "writing a
-letter", a stock businessman for "elderly man". Reject text-heavy images,
-screenshots, logos, collages and charts. Accept a picture that shows the idea
-even if the details differ; it is a memory aid, not an illustration.
+Reject a picture that shows a DIFFERENT THING -- a keyboard for "writing a
+letter", an apple for "pear", a stock businessman for "elderly man". Reject
+text-heavy images, screenshots, logos, collages and charts.
+
+Do not reject over degree, amount or incidental detail. A sky with one cloud
+is a clear sky. A half-eaten meal is a meal. Three apples are an apple. This
+is a memory aid on a flashcard, not an illustration in a dictionary, and the
+learner only has to recognise what it is.
 
 Judge the picture ONLY against what it is meant to show. When the card carries
 two pictures, each one carries half the idea: do not reject a picture for
@@ -81,6 +85,12 @@ Never move to a cause or a consequence. Failed brakes are not a car crash, a
 missed train is not an empty platform at night. Stay on the object the sentence
 names, and drop any negation: "car brakes not working" -> "car brakes".
 
+Never change which sense of a word is meant. "clear sky" is about the sky, so
+the repair is "blue sky" or "cloudless sky" -- never "transparent glass",
+which keeps the word and loses the subject. When the failed query names a
+concrete thing, the repair must still be about that thing; only a query naming
+a state of mind may move to a gesture or object that stands for it.
+
 Reply with JSON only: {"query": "...", "fallback": "...", "skip": false}"""
 
 REQUERY_EXAMPLES = [
@@ -96,6 +106,9 @@ REQUERY_EXAMPLES = [
     ("The image shows a mechanic working on brakes, not brakes that are not working.",
      "car brakes not working",
      {"query": "car brakes", "fallback": "brake disc", "skip": False}),
+    ("The sky is not clear, there is a large cloud.",
+     "clear sky",
+     {"query": "blue sky", "fallback": "open sky", "skip": False}),
 ]
 
 
